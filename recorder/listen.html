@@ -12,24 +12,29 @@
   .name { font-weight: 600; margin-bottom: 6px; } audio { width: 100%; }
   .stars { display: flex; gap: 6px; margin-top: 8px; }
   .stars button { flex: 1; height: 42px; border-radius: 10px; border: 1px solid #8884; background: transparent; color: inherit; font-size: 16px; }
+  .saved { font-size: 14px; color: #3a9d5d; min-height: 1.2em; margin-top: 6px; }
   .stars button.on { background: #2f6fde; color: #fff; border-color: #2f6fde; }
 </style>
 </head>
 <body>
 <h1>Which voice sounds most natural?</h1>
-<p>Rate each 1 (robotic) to 5 (a person). Ratings save as you tap.</p>
+<p>Rate each 1 (robotic) to 5 (a person). Each tap saves on its own; there's no submit button.</p>
 <div id="list">Loading...</div>
 <script>
-fetch("/api/tts").then(r => r.json()).then(files => {
+const only = new URLSearchParams(location.search).get("only") || "";
+Promise.all([fetch("/api/tts").then(r => r.json()), fetch("/api/picks").then(r => r.json())]).then(([all, picks]) => {
+  const files = all.filter(f => f.includes(only));
   const list = document.getElementById("list");
   list.innerHTML = files.length ? "" : "No samples yet.";
   for (const f of files) {
     const d = document.createElement("div"); d.className = "clip";
     d.innerHTML = `<div class="name">${f.replace(/\.wav$/, "")}</div><audio controls preload="none" src="/tts/${f}"></audio>
-      <div class="stars">${[1,2,3,4,5].map(n => `<button data-n="${n}">${n}</button>`).join("")}</div>`;
+      <div class="stars">${[1,2,3,4,5].map(n => `<button data-n="${n}" class="${picks[f] === n ? "on" : ""}">${n}</button>`).join("")}</div>
+      <div class="saved">${picks[f] ? "Saved" : ""}</div>`;
     d.querySelectorAll("button").forEach(b => b.onclick = async () => {
       d.querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
-      await fetch("/api/pick", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ file: f, score: +b.dataset.n }) });
+      const r = await fetch("/api/pick", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ file: f, score: +b.dataset.n }) });
+      d.querySelector(".saved").textContent = r.ok ? `Saved: ${b.dataset.n}` : "Save failed, tap again";
     });
     list.appendChild(d);
   }

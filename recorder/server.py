@@ -54,6 +54,14 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data[start:end + 1])
 
     def do_GET(self):
+        self.path = self.path.split("?", 1)[0]
+        if self.path == "/api/picks":
+            latest = {}
+            if (DATA_DIR / "picks.jsonl").exists():
+                for line in open(DATA_DIR / "picks.jsonl"):
+                    d = json.loads(line)
+                    latest[d["file"]] = d["score"]
+            return self._send(200, latest)
         if self.path == "/healthz":
             return self._send(200, b"ok", "text/plain")
         if self.path == "/api/prompts":
