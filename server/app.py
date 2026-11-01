@@ -18,6 +18,7 @@ from pathlib import Path
 from aiohttp import WSMsgType, web
 
 from brain import Brain
+from herdr_brain import HerdrBrain
 from speech import STT, TTS, GLOSSARY, SentenceSplitter
 
 APP = Path(__file__).parent
@@ -42,7 +43,8 @@ def pairing_token():
 TOKEN = pairing_token()
 
 contract = (APP / "contract.md").read_text().replace("{glossary}", ", ".join(GLOSSARY))
-brain = Brain(contract)
+# "herdr" drives a real herdr pane on spiff (M4); "pod" is M1's claude -p session inside this pod
+brain = HerdrBrain(contract) if os.environ.get("BRAIN_BACKEND", "pod") == "herdr" else Brain(contract)
 stt = STT()
 tts = TTS()
 
@@ -76,6 +78,9 @@ async def run_turn(ws, text, timing):
             timing.setdefault("first_token", time.time())
             for s in splitter.feed(val):
                 await queue.put(s)
+        elif kind == "notice":
+            await ws.send_json({"type": "error", "text": val})
+            await queue.put(val)
         elif kind == "file":
             files.append(val)
             await ws.send_json({"type": "file", "path": val})

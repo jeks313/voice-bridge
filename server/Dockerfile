@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg git ca-c
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir --require-hashes -r /tmp/requirements.txt && rm /tmp/requirements.txt
 RUN mkdir -p /app/static
-COPY --chmod=644 app.py brain.py speech.py contract.md glossary.txt /app/
+COPY --chmod=644 app.py brain.py herdr_brain.py speech.py contract.md glossary.txt /app/
 COPY --chmod=644 static/ /app/static/
 
 USER 1000:1000
