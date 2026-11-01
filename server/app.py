@@ -20,6 +20,7 @@ from aiohttp import WSMsgType, web
 
 from brain import Brain
 from herdr_brain import HerdrBrain
+import cues
 import permission
 from speech import STT, TTS, GLOSSARY, SentenceSplitter
 
@@ -64,9 +65,9 @@ class Conn:
         async with self.lock:
             await self.ws.send_json(obj)
 
-    async def say(self, text, seq, audio):
+    async def say(self, text, seq, audio, cue=False):
         async with self.lock:  # the "say" frame and its WAV must stay adjacent
-            await self.ws.send_json({"type": "say", "text": text, "seq": seq, "audio": bool(audio)})
+            await self.ws.send_json({"type": "say", "text": text, "seq": seq, "audio": bool(audio), "cue": cue})
             if audio:
                 await self.ws.send_bytes(audio)
 
@@ -92,6 +93,9 @@ async def run_turn(conn, text, timing):
     async def speaker():
         seq, tts_ok = 0, True
         while (sentence := await queue.get()) is not None:
+            is_cue = isinstance(sentence, tuple)  # ("cue", text): a status line, not part of the reply
+            if is_cue:
+                sentence = sentence[1]
             audio = None
             if tts_ok:
                 try:
@@ -99,6 +103,9 @@ async def run_turn(conn, text, timing):
                 except Exception as e:  # keep the turn going; the text still shows on screen
                     tts_ok = False
                     await conn.send({"type": "error", "text": f"Voice unavailable ({e.__class__.__name__}); showing text only"})
+            if is_cue:
+                await conn.say(sentence, -1, audio, cue=True)
+                continue
             if audio and seq == 0:
                 timing["first_audio"] = time.time()
             await conn.say(sentence, seq, audio)
@@ -124,13 +131,42 @@ async def run_turn(conn, text, timing):
         log_event({"permission": p["tool"], "detail": p["detail"], "risky": p["risky"], "answer": answer})
         return answer
 
+    spoken_kinds, counts = set(), {}
+    last_sound = [time.time()]  # when anything was last said (a sentence or a cue)
+
+    async def cue_tool(name, inp):
+        c = cues.cue(name, inp)
+        if not c:
+            return
+        kind, line = c
+        counts[kind] = counts.get(kind, 0) + 1
+        await conn.send({"type": "tool", "kind": kind, "count": counts[kind], "line": line, "name": name})
+        if kind not in spoken_kinds:
+            spoken_kinds.add(kind)
+            last_sound[0] = time.time()
+            await queue.put(("cue", line))
+
+    async def ticker():
+        """Twenty seconds of silence mid-turn gets a "still working"."""
+        said = 0
+        while said < 3:
+            await asyncio.sleep(2)
+            if time.time() - last_sound[0] > 20 and not conn.pending:
+                last_sound[0] = time.time()
+                said += 1
+                await queue.put(("cue", "Still working on it."))
+
     spk = asyncio.create_task(speaker())
+    tick = asyncio.create_task(ticker())
     try:
         async for kind, val in brain.turn(text, ask=ask) if isinstance(brain, HerdrBrain) else brain.turn(text):
             if kind == "text":
                 timing.setdefault("first_token", time.time())
                 for s in splitter.feed(val):
+                    last_sound[0] = time.time()
                     await queue.put(s)
+            elif kind == "tool":
+                await cue_tool(val["name"], val["input"])
             elif kind == "notice":
                 await conn.send({"type": "error", "text": val})
                 await queue.put(val)
@@ -144,6 +180,7 @@ async def run_turn(conn, text, timing):
                 if val.get("error") or val.get("is_error"):
                     await conn.send({"type": "error", "text": f"Claude: {val.get('error') or val.get('result')}"})
     finally:
+        tick.cancel()
         await queue.put(None)
         await spk
     timing["done"] = time.time()

@@ -217,8 +217,9 @@ class HerdrBrain:
                             if block.get("type") == "text" and block.get("text", "").strip():
                                 said = True
                                 yield "text", block["text"] + "\n"
-                            elif block.get("type") == "tool_use" and block.get("name") in FILE_TOOLS:
-                                if fp := (block.get("input") or {}).get("file_path"):
+                            elif block.get("type") == "tool_use":
+                                yield "tool", {"name": block.get("name"), "input": block.get("input") or {}}
+                                if block.get("name") in FILE_TOOLS and (fp := (block.get("input") or {}).get("file_path")):
                                     yield "file", fp
                 if new:
                     quiet_since = None
