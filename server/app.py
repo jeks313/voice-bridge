@@ -4,7 +4,9 @@ WebSocket /ws protocol (JSON text frames, audio as binary frames):
   client -> {"type":"hello","token":...}           server warms TTS, replies {"type":"ready",...}
   client -> {"type":"utterance","mime":...} + one binary frame (the recording)
   client -> {"type":"text","text":...}              typed turn, same path minus STT
-  client -> {"type":"new_conversation"}
+  client -> {"type":"new_conversation"}             (pod brain: fresh session; herdr brain: new topic tab)
+  client -> {"type":"topics"} | {"type":"switch_topic","id"} | {"type":"new_topic","name"} | {"type":"rename_topic","id","name"}
+  server -> {"type":"topics","items":[{"id","name","status","last","active"}]}
   server -> {"type":"transcript","text"} | {"type":"say","text","seq"} + binary WAV
             {"type":"file","path"} | {"type":"turn_done","timing":{...}} | {"type":"error","text"}
 """
@@ -158,6 +160,8 @@ async def run_turn(conn, text, timing):
 
     spk = asyncio.create_task(speaker())
     tick = asyncio.create_task(ticker())
+    if isinstance(brain, HerdrBrain):
+        asyncio.create_task(name_topic(conn, text))
     try:
         async for kind, val in brain.turn(text, ask=ask) if isinstance(brain, HerdrBrain) else brain.turn(text):
             if kind == "text":
@@ -268,6 +272,27 @@ async def ws_handler(request):
                 async with brain.lock:
                     sid = await brain.start(new=True)
                 await conn.send({"type": "ready", "tts": await tts.status(), "session": sid})
+            elif m["type"] == "topics":
+                await send_topics(conn)
+            elif m["type"] in ("switch_topic", "new_topic"):
+                if conn.busy:
+                    await conn.send({"type": "error", "text": "Still working on the last one."})
+                    continue
+                try:
+                    if m["type"] == "switch_topic":
+                        await brain.switch_topic(m["id"])
+                    else:
+                        async with brain.lock:
+                            await brain.new_topic((m.get("name") or "").strip() or "New chat")
+                except Exception as e:
+                    await conn.send({"type": "error", "text": f"couldn't change topic: {e}"})
+                    continue
+                items = await brain.history()
+                await conn.send({"type": "history", "items": items, "session": brain.session_id})
+                await send_topics(conn)
+            elif m["type"] == "rename_topic":
+                await brain.rename_topic(m["id"], m.get("name") or "Untitled")
+                await send_topics(conn)
             elif m["type"] == "history":
                 items = await brain.history() if hasattr(brain, "history") else []
                 await conn.send({"type": "history", "items": items, "session": brain.session_id})
@@ -291,6 +316,19 @@ async def ws_handler(request):
     if conn.pending and not conn.pending["fut"].done():
         conn.pending["fut"].set_result(None)  # phone went away: leave the prompt for the desk
     return ws
+
+
+async def name_topic(conn, text):
+    try:
+        await brain.name_if_untitled(text)
+        await send_topics(conn)
+    except Exception:
+        pass  # naming is cosmetic
+
+
+async def send_topics(conn):
+    items = await brain.topics() if hasattr(brain, "topics") else []
+    await conn.send({"type": "topics", "items": items})
 
 
 async def turn(conn, text, timing):

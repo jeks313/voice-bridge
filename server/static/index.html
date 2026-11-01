@@ -38,18 +38,26 @@
   .row { display: flex; gap: 8px; }
   .row input { flex: 1; background: var(--card); border: 1px solid #2c3140; color: inherit; border-radius: 12px; padding: 10px 12px; font-size: 16px; }
   .row button { background: var(--card); border: 1px solid #2c3140; color: inherit; border-radius: 12px; padding: 0 14px; font-size: 15px; }
+  header #topicbtn { margin-left: auto; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  header #topicbtn + #newconv { margin-left: 0; }
+  #topics { position: fixed; inset: 0; background: var(--bg); display: none; flex-direction: column; padding: env(safe-area-inset-top) 0 0; }
+  #topics header { color: #e8eaf0; font-size: 16px; } #tlist { flex: 1; overflow-y: auto; padding: 4px 12px 40px; }
+  .topic { display: flex; align-items: center; gap: 10px; background: var(--card); border: 1px solid #2c3140; border-radius: 12px; padding: 12px; margin: 8px 0; }
+  .topic.active { border-color: var(--accent); } .topic .nm { flex: 1; } .topic .sub { font-size: 13px; color: var(--muted); }
+  .topic button { background: none; border: 1px solid #333846; color: #c8ccd8; border-radius: 10px; padding: 6px 10px; font-size: 14px; }
   #viewer { position: fixed; inset: 0; background: var(--bg); display: none; flex-direction: column; padding: env(safe-area-inset-top) 0 0; }
   #viewer header { color: #e8eaf0; } #viewer pre { flex: 1; overflow: auto; margin: 0; padding: 12px 16px 40px; white-space: pre-wrap; font: 15px/1.5 -apple-system, system-ui, sans-serif; }
 </style>
 </head>
 <body>
-<header><span class="dot" id="dot"></span><span id="state">Connecting...</span><button id="newconv">New chat</button></header>
+<header><span class="dot" id="dot"></span><span id="state">Connecting...</span><button id="topicbtn">Chats</button><button id="newconv">New chat</button></header>
 <div id="log"></div>
 <footer>
   <div id="activity" style="min-height:1.2em;font-size:13px;color:var(--muted);text-align:center"></div>
   <button id="talk">Tap to talk</button>
   <div class="row"><input id="typed" placeholder="Or type..." enterkeyhint="send"><button id="stop">Stop</button></div>
 </footer>
+<div id="topics"><header><span>Voice chats</span><button id="tclose" style="margin-left:auto">Close</button></header><div id="tlist"></div></div>
 <div id="viewer"><header><span id="vname"></span><button id="vclose">Close</button></header><pre id="vbody"></pre></div>
 <script>
 const $ = id => document.getElementById(id);
@@ -121,7 +129,8 @@ function connect() {
     lastMsg = Date.now();
     if (typeof ev.data !== "string") { if (nextIsAudio) play(ev.data); nextIsAudio = false; return; }
     const m = JSON.parse(ev.data);
-    if (m.type === "ready" && !historyLoaded) { historyLoaded = true; ws.send(JSON.stringify({ type: "history" })); }
+    if (m.type === "ready" && !historyLoaded) { historyLoaded = true; ws.send(JSON.stringify({ type: "history" })); ws.send(JSON.stringify({ type: "topics" })); }
+    if (m.type === "topics") { showTopics(m.items); return; }
     if (m.type === "history") {
       $("log").innerHTML = "";
       if (m.items.length) {
@@ -217,12 +226,52 @@ $("typed").onkeydown = e => {
   add("me", e.target.value); ws.send(JSON.stringify({ type: "text", text: e.target.value })); e.target.value = ""; setBusy(true); lastMsg = Date.now();
 };
 $("stop").onclick = () => stopAudio();
+let topicList = [];
+function ago(t) {
+  if (!t) return "never";
+  const s = Date.now() / 1000 - t;
+  return s < 90 ? "just now" : s < 3600 ? Math.round(s / 60) + " min ago" : s < 86400 ? Math.round(s / 3600) + " h ago" : Math.round(s / 86400) + " d ago";
+}
+function showTopics(items) {
+  topicList = items || [];
+  const cur = topicList.find(t => t.active);
+  $("topicbtn").textContent = cur ? cur.name : "Chats";
+  $("tlist").innerHTML = "";
+  for (const t of topicList) {
+    const d = document.createElement("div"); d.className = "topic" + (t.active ? " active" : "");
+    d.innerHTML = `<div class="nm"><div></div><div class="sub"></div></div><button>Rename</button>`;
+    d.querySelector(".nm div").textContent = t.name;
+    d.querySelector(".sub").textContent = (t.status === "working" ? "working · " : t.status === "blocked" ? "needs input · " : "") + ago(t.last);
+    d.querySelector(".nm").onclick = () => switchTopic(t);
+    d.querySelector("button").onclick = () => {
+      const n = prompt("Rename chat", t.name);
+      if (n && n.trim()) ws.send(JSON.stringify({ type: "rename_topic", id: t.id, name: n.trim() }));
+    };
+    $("tlist").appendChild(d);
+  }
+}
+function switchTopic(t) {
+  $("topics").style.display = "none";
+  if (t.active || busy || !connected()) return;
+  stopAudio(); $("log").innerHTML = ""; add("meta", "Switching to " + t.name + "...");
+  ws.send(JSON.stringify({ type: "switch_topic", id: t.id }));
+}
 function newChat() {
   if (busy || !connected()) return;
-  $("log").innerHTML = ""; add("meta", "Starting a new conversation...");
-  ws.send(JSON.stringify({ type: "new_conversation" }));
-  historyLoaded = false;  // the next "ready" reloads the (now empty) history
+  if (!topicList.length) {  // single-session backend: start over in place
+    $("log").innerHTML = ""; add("meta", "Starting a new conversation...");
+    ws.send(JSON.stringify({ type: "new_conversation" }));
+    historyLoaded = false;  // the next "ready" reloads the (now empty) history
+    return;
+  }
+  const name = prompt("Name the new chat (or leave blank and it's named from what you say first)", "");
+  if (name === null) return;
+  $("topics").style.display = "none";
+  stopAudio(); $("log").innerHTML = ""; add("meta", "Starting a new chat (about 10 s)...");
+  ws.send(JSON.stringify({ type: "new_topic", name }));
 }
+$("topicbtn").onclick = () => { if (connected()) ws.send(JSON.stringify({ type: "topics" })); $("topics").style.display = "flex"; };
+$("tclose").onclick = () => $("topics").style.display = "none";
 $("newconv").onclick = newChat;
 connect();
 </script>

@@ -62,10 +62,19 @@ class HerdrBrain:
     def __init__(self, contract: str):
         self.lock = asyncio.Lock()
         self.migrate_file = STATE / "session.json"  # the pod-owned session from M1, carried over once
+        self.topic_file = STATE / "topic.json"  # the active topic: {"pane": herdr pane id}
+        try:
+            self.target = json.loads(self.topic_file.read_text())["pane"]
+        except (OSError, ValueError, KeyError):
+            self.target = NAME  # the original single "voice" agent
+
+    def _set_target(self, pane):
+        self.target = pane
+        self.topic_file.write_text(json.dumps({"pane": pane}))
 
     async def agent(self):
         try:
-            return (await herdr("agent", "get", NAME))["agent"]
+            return (await herdr("agent", "get", self.target))["agent"]
         except HerdrError:
             return None
 
@@ -91,6 +100,9 @@ class HerdrBrain:
 
     async def _ensure(self):
         a = await self.agent()
+        if not a and self.target != NAME:
+            self._set_target(NAME)  # the active topic's tab was closed: fall back to the original agent
+            a = await self.agent()
         if a:
             self._sid = (a.get("agent_session") or {}).get("value")
             return a
@@ -112,7 +124,7 @@ class HerdrBrain:
         except HerdrError as e:
             if "agent_not_ready" not in str(e):
                 raise
-            await herdr("agent", "wait", NAME, "--until", "idle", "--timeout", "60000", timeout=70)
+            await herdr("agent", "wait", self.target, "--until", "idle", "--timeout", "60000", timeout=70)
         if carry:
             d = json.loads(self.migrate_file.read_text())
             d["moved_to_herdr"] = True
@@ -159,14 +171,72 @@ class HerdrBrain:
         return items[-limit:]
 
     async def start(self, new=False):
-        a = await self._ensure()
         if new:
-            await self._wait_ready()
-            await herdr("agent", "prompt", NAME, "/clear")
-            await asyncio.sleep(1.0)
-            a = await self.agent()
-            self._sid = (a.get("agent_session") or {}).get("value")
+            return await self.new_topic()
+        await self._ensure()
         return self._sid
+
+    # ---- topics: one herdr tab (with its own claude agent) per conversation, all in the voice workspace
+
+    async def _workspace(self):
+        ws = [w for w in (await herdr("workspace", "list"))["workspaces"] if w.get("label") == NAME]
+        return ws[0]["workspace_id"] if ws else None
+
+    async def topics(self):
+        """[{"id": pane, "tab", "name", "status", "last", "active"}], most recently used first."""
+        wid = await self._workspace()
+        if not wid:
+            return []
+        tabs = {t["tab_id"]: t for t in (await herdr("tab", "list", "--workspace", wid))["tabs"]}
+        out = []
+        for a in (await herdr("agent", "list"))["agents"]:
+            if a.get("workspace_id") != wid or a.get("tab_id") not in tabs:
+                continue
+            path = self._jsonl(a)
+            out.append({"id": a["pane_id"], "tab": a["tab_id"], "name": tabs[a["tab_id"]].get("label") or "Untitled",
+                        "status": a.get("agent_status"), "last": path.stat().st_mtime if path.exists() else 0,
+                        "active": a["pane_id"] == self.target or a.get("name") == self.target})
+        return sorted(out, key=lambda t: -t["last"])
+
+    async def switch_topic(self, pane):
+        async with self.lock:
+            if not any(t["id"] == pane for t in await self.topics()):
+                raise HerdrError("no such voice topic")
+            self._set_target(pane)
+            return await self._ensure()
+
+    async def new_topic(self, name="New chat"):
+        """A fresh tab in the voice workspace running its own claude agent; it becomes the active topic."""
+        await self._ensure()  # makes the workspace on first use
+        wid = await self._workspace()
+        r = await herdr("tab", "create", "--workspace", wid, "--cwd", CWD, "--label", name, "--no-focus")
+        pane = r["root_pane"]["pane_id"]
+        await asyncio.sleep(1.5)  # let the shell reach its prompt
+        agent_name = "voice-" + pane.replace(":", "-").lower()
+        try:
+            await herdr("agent", "start", agent_name, "--kind", "claude", "--pane", pane, "--timeout", "90000",
+                        "--", "--model", MODEL, timeout=120)
+        except HerdrError as e:
+            if "agent_not_ready" not in str(e):
+                raise
+            await herdr("agent", "wait", pane, "--until", "idle", "--timeout", "60000", timeout=70)
+        self._set_target(pane)
+        a = await self.agent()
+        self._sid = (a.get("agent_session") or {}).get("value")
+        return self._sid
+
+    async def rename_topic(self, pane, name):
+        t = [t for t in await self.topics() if t["id"] == pane]
+        if t:
+            await herdr("tab", "rename", t[0]["tab"], *name.split())
+
+    async def name_if_untitled(self, text):
+        """Name a "New chat" tab after the first thing said in it."""
+        t = [t for t in await self.topics() if t["active"]]
+        if t and t[0]["name"] == "New chat":
+            words = [w.strip(".,?!") for w in text.split()][:5]
+            if words:
+                await herdr("tab", "rename", t[0]["tab"], *words)
 
     async def stop(self):
         pass  # the pane belongs to herdr; it outlives the bridge
@@ -176,7 +246,7 @@ class HerdrBrain:
         if a and a.get("agent_status") in READY:
             return a
         # queue behind whatever the pane is doing (e.g. Chris typing at his desk)
-        await herdr("agent", "wait", NAME, "--until", "idle", "--until", "done", "--until", "blocked",
+        await herdr("agent", "wait", self.target, "--until", "idle", "--until", "done", "--until", "blocked",
                     "--timeout", str(timeout_s * 1000), timeout=timeout_s + 10)
         return await self.agent()
 
@@ -189,7 +259,7 @@ class HerdrBrain:
 
     async def answer_permission(self, ask):
         """The pane is blocked: read the dialog, ask Chris, press the answer. Returns what happened."""
-        screen = await herdr_text("agent", "read", NAME, "--source", "visible", "--lines", "80")
+        screen = await herdr_text("agent", "read", self.target, "--source", "visible", "--lines", "80")
         p = permission.parse(screen)
         if not p:
             return "unreadable"
@@ -197,9 +267,9 @@ class HerdrBrain:
         if answer == "approve":
             if not p["cursor_on_yes"]:
                 return "cursor not on Yes; left for the desk"
-            await herdr("agent", "send-keys", NAME, "Enter")
+            await herdr("agent", "send-keys", self.target, "Enter")
         elif answer == "deny":
-            await herdr("agent", "send-keys", NAME, "esc")
+            await herdr("agent", "send-keys", self.target, "esc")
         else:
             return "no answer; left for the desk"
         for _ in range(40):  # the dialog takes a moment to clear
@@ -220,7 +290,7 @@ class HerdrBrain:
             path = self._jsonl(a)
             offset = path.stat().st_size if path.exists() else 0
             prompt = "[voice] " + " ".join(text.split())
-            await herdr("agent", "prompt", NAME, prompt)
+            await herdr("agent", "prompt", self.target, prompt)
             loop = asyncio.get_running_loop()
             started = loop.time()
             seen_prompt = said = False
