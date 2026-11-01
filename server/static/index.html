@@ -131,6 +131,7 @@ function connect() {
     const m = JSON.parse(ev.data);
     if (m.type === "ready" && !historyLoaded) { historyLoaded = true; ws.send(JSON.stringify({ type: "history" })); ws.send(JSON.stringify({ type: "topics" })); }
     if (m.type === "topics") { showTopics(m.items); return; }
+    if (m.type === "fallback") { add("me", m.text); return; }  // the spoken cue that follows says why the chat changed
     if (m.type === "history") {
       $("log").innerHTML = "";
       if (m.items.length) {

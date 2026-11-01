@@ -171,6 +171,11 @@ async def run_turn(conn, text, timing):
                     await queue.put(s)
             elif kind == "tool":
                 await cue_tool(val["name"], val["input"])
+            elif kind == "fallback":
+                await conn.send({"type": "history", "items": await brain.history(), "session": brain.session_id})
+                await conn.send({"type": "fallback", "name": val, "text": text})
+                await send_topics(conn)
+                await queue.put(("cue", f"That chat was closed in herdr, so I'm back in {val}."))
             elif kind == "notice":
                 await conn.send({"type": "error", "text": val})
                 await queue.put(val)

@@ -102,6 +102,7 @@ class HerdrBrain:
         a = await self.agent()
         if not a and self.target != NAME:
             self._set_target(NAME)  # the active topic's tab was closed: fall back to the original agent
+            self.fell_back = True  # the next turn tells the phone
             a = await self.agent()
         if a:
             self._sid = (a.get("agent_session") or {}).get("value")
@@ -282,6 +283,10 @@ class HerdrBrain:
         """Yield ("text", block), ("file", path), ("notice", msg) and finally ("done", info)."""
         async with self.lock:
             a = await self._ensure()
+            if getattr(self, "fell_back", False):
+                self.fell_back = False
+                cur = [t for t in await self.topics() if t["active"]]
+                yield "fallback", cur[0]["name"] if cur else NAME
             a = await self._wait_ready()
             if a.get("agent_status") == "blocked":
                 yield "notice", "The voice session is waiting on a permission prompt in herdr."
