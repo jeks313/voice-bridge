@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Voice">
+<meta name="theme-color" content="#111318">
+<link rel="manifest" href="/static/manifest.json">
+<title>Voice</title>
+<style>
+  :root { color-scheme: dark; --bg: #111318; --card: #1b1e25; --muted: #8b90a0; --accent: #4f7cff; --rec: #e5484d; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--bg); color: #e8eaf0; font: 17px/1.45 -apple-system, system-ui, sans-serif;
+         display: flex; flex-direction: column; padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+  header { display: flex; align-items: center; gap: 10px; padding: 10px 16px; font-size: 14px; color: var(--muted); }
+  header .dot { width: 8px; height: 8px; border-radius: 50%; background: #666; }
+  header .dot.ok { background: #3fb950; } header .dot.loading { background: #d29922; }
+  header button { margin-left: auto; background: none; border: 1px solid #333846; color: #c8ccd8; border-radius: 10px; padding: 6px 10px; font-size: 14px; }
+  #log { flex: 1; overflow-y: auto; padding: 8px 16px 16px; display: flex; flex-direction: column; gap: 10px; }
+  .me { align-self: flex-end; background: #26344f; padding: 8px 12px; border-radius: 14px 14px 4px 14px; max-width: 85%; }
+  .it { align-self: flex-start; background: var(--card); padding: 8px 12px; border-radius: 14px 14px 14px 4px; max-width: 90%; }
+  .file { align-self: flex-start; background: #1f2a1f; border: 1px solid #2f4a2f; padding: 8px 12px; border-radius: 12px; font-size: 15px; }
+  .meta { align-self: center; font-size: 12px; color: var(--muted); }
+  .err { align-self: center; font-size: 14px; color: #ff8a8a; }
+  footer { padding: 10px 16px 14px; display: flex; flex-direction: column; gap: 10px; }
+  #talk { height: 96px; border-radius: 26px; border: 0; background: var(--accent); color: #fff; font-size: 21px; font-weight: 600; touch-action: manipulation; }
+  #talk.rec { background: var(--rec); } #talk.busy { background: #333a4d; color: #aab; }
+  .row { display: flex; gap: 8px; }
+  .row input { flex: 1; background: var(--card); border: 1px solid #2c3140; color: inherit; border-radius: 12px; padding: 10px 12px; font-size: 16px; }
+  .row button { background: var(--card); border: 1px solid #2c3140; color: inherit; border-radius: 12px; padding: 0 14px; font-size: 15px; }
+  #viewer { position: fixed; inset: 0; background: var(--bg); display: none; flex-direction: column; padding: env(safe-area-inset-top) 0 0; }
+  #viewer header { color: #e8eaf0; } #viewer pre { flex: 1; overflow: auto; margin: 0; padding: 12px 16px 40px; white-space: pre-wrap; font: 15px/1.5 -apple-system, system-ui, sans-serif; }
+</style>
+</head>
+<body>
+<header><span class="dot" id="dot"></span><span id="state">Connecting...</span><button id="newconv">New</button></header>
+<div id="log"></div>
+<footer>
+  <button id="talk">Tap to talk</button>
+  <div class="row"><input id="typed" placeholder="Or type..." enterkeyhint="send"><button id="stop">Stop</button></div>
+</footer>
+<div id="viewer"><header><span id="vname"></span><button id="vclose">Close</button></header><pre id="vbody"></pre></div>
+<script>
+const $ = id => document.getElementById(id);
+const params = new URLSearchParams(location.search);
+if (params.get("key")) { localStorage.voiceKey = params.get("key"); history.replaceState(null, "", "/"); }
+const token = localStorage.voiceKey || "";
+let ws, rec, chunks = [], busy = false, ctx, playing = Promise.resolve(), stopGen = 0, nextIsAudio = false;
+
+function add(cls, text) {
+  const d = document.createElement("div"); d.className = cls; d.textContent = text;
+  $("log").appendChild(d); $("log").scrollTop = $("log").scrollHeight; return d;
+}
+function setState(text, cls) { $("state").textContent = text; $("dot").className = "dot " + (cls || ""); }
+function setBusy(b) { busy = b; $("talk").classList.toggle("busy", b); $("talk").textContent = b ? "Thinking..." : "Tap to talk"; }
+
+function audioCtx() {
+  if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
+  if (ctx.state === "suspended") ctx.resume();
+  return ctx;
+}
+function chime(freq = 880, dur = 0.08) {
+  const c = audioCtx(), o = c.createOscillator(), g = c.createGain();
+  o.frequency.value = freq; g.gain.setValueAtTime(0.08, c.currentTime); g.gain.exponentialRampToValueAtTime(0.0001, c.currentTime + dur);
+  o.connect(g).connect(c.destination); o.start(); o.stop(c.currentTime + dur);
+}
+function play(buf) {
+  const gen = stopGen;
+  playing = playing.then(() => new Promise(async done => {
+    if (gen !== stopGen) return done();
+    try {
+      const c = audioCtx(), b = await c.decodeAudioData(buf), s = c.createBufferSource();
+      s.buffer = b; s.connect(c.destination); s.onended = done; s.start();
+      window._src = s;
+    } catch (e) { add("err", "Audio error: " + e.message); done(); }
+  }));
+}
+function stopAudio() { stopGen++; try { window._src && window._src.stop(); } catch {} playing = Promise.resolve(); }
+
+function connect() {
+  ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
+  ws.binaryType = "arraybuffer";
+  ws.onopen = () => ws.send(JSON.stringify({ type: "hello", token }));
+  ws.onclose = () => { setState("Disconnected, retrying...", ""); setTimeout(connect, 1500); };
+  ws.onmessage = ev => {
+    if (typeof ev.data !== "string") { if (nextIsAudio) play(ev.data); nextIsAudio = false; return; }
+    const m = JSON.parse(ev.data);
+    if (m.type === "ready" || m.type === "status") {
+      const t = m.tts || "?";
+      setState(t === "ready" ? "Voice ready" : t === "loading" ? "Voice loading (about 15 s)..." : "Voice: " + t,
+               t === "ready" ? "ok" : t === "loading" ? "loading" : "");
+      if (t === "loading") setTimeout(() => ws.readyState === 1 && ws.send(JSON.stringify({ type: "status" })), 3000);
+    } else if (m.type === "transcript") {
+      add("me", m.text || "(didn't catch that)");
+    } else if (m.type === "say") {
+      add("it", m.text); nextIsAudio = m.audio;
+    } else if (m.type === "file") {
+      const d = add("file", "File: " + m.path.split("/").slice(-2).join("/"));
+      d.onclick = () => openFile(m.path);
+    } else if (m.type === "turn_done") {
+      setBusy(false);
+      const t = m.timing || {};
+      if (t.first_audio !== undefined) add("meta", `heard ${t.transcript ?? "-"}s · first words ${t.first_token ?? "-"}s · first audio ${t.first_audio}s`);
+    } else if (m.type === "error") {
+      add("err", m.text); setBusy(false);
+    }
+  };
+}
+async function openFile(path) {
+  const r = await fetch(`/api/file?path=${encodeURIComponent(path)}&token=${encodeURIComponent(token)}`);
+  $("vname").textContent = path.split("/").pop(); $("vbody").textContent = r.ok ? await r.text() : "Can't open " + path;
+  $("viewer").style.display = "flex";
+}
+$("vclose").onclick = () => $("viewer").style.display = "none";
+
+async function startRec() {
+  audioCtx(); stopAudio();
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+  const type = ["audio/mp4", "audio/webm;codecs=opus", "audio/webm"].find(t => MediaRecorder.isTypeSupported(t)) || "";
+  rec = new MediaRecorder(stream, type ? { mimeType: type } : {});
+  chunks = []; rec.ondataavailable = e => e.data.size && chunks.push(e.data);
+  rec.onstop = async () => {
+    stream.getTracks().forEach(t => t.stop());
+    const blob = new Blob(chunks, { type: rec.mimeType || "audio/mp4" }); rec = null;
+    chime(660); setBusy(true);
+    ws.send(JSON.stringify({ type: "utterance", mime: blob.type }));
+    ws.send(await blob.arrayBuffer());
+  };
+  rec.start(); chime(880);
+  $("talk").classList.add("rec"); $("talk").textContent = "Listening... tap to send";
+}
+$("talk").onclick = () => {
+  if (busy) return;
+  if (rec) { $("talk").classList.remove("rec"); rec.stop(); }
+  else startRec().catch(e => add("err", "Mic: " + e.message));
+};
+$("typed").onkeydown = e => {
+  if (e.key !== "Enter" || !e.target.value.trim() || busy) return;
+  audioCtx(); stopAudio();
+  add("me", e.target.value); ws.send(JSON.stringify({ type: "text", text: e.target.value })); e.target.value = ""; setBusy(true);
+};
+$("stop").onclick = () => stopAudio();
+$("newconv").onclick = () => { if (confirm("Start a new conversation?")) { $("log").innerHTML = ""; ws.send(JSON.stringify({ type: "new_conversation" })); } };
+connect();
+</script>
+</body>
+</html>

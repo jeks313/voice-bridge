@@ -1,0 +1,5 @@
+aiohttp>=3.10
+numpy>=2
+faster-whisper>=1.1
+nvidia-cublas-cu12
+nvidia-cudnn-cu12==9.*

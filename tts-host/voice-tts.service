@@ -1,0 +1,16 @@
+# khelt WSL: load-on-demand Drama 3 TTS for the voice bridge.
+# Install: sudo cp voice-tts.service /etc/systemd/system/ && sudo systemctl enable --now voice-tts
+# Published to the tailnet from Windows: tailscale serve --bg --tcp 8091 tcp://localhost:8091
+[Unit]
+Description=Voice bridge TTS (Drama 3, loads on demand)
+After=network-online.target
+
+[Service]
+User=jeks
+ExecStart=/usr/bin/python3 -u /home/jeks/voice-bridge/tts-host/drama_supervisor.py
+Environment=IDLE_SECS=600
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
