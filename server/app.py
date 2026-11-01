@@ -268,6 +268,9 @@ async def ws_handler(request):
                 async with brain.lock:
                     sid = await brain.start(new=True)
                 await conn.send({"type": "ready", "tts": await tts.status(), "session": sid})
+            elif m["type"] == "history":
+                items = await brain.history() if hasattr(brain, "history") else []
+                await conn.send({"type": "history", "items": items, "session": brain.session_id})
             elif m["type"] == "status":
                 await conn.send({"type": "status", "tts": await tts.status()})
         elif msg.type == WSMsgType.BINARY and authed and pending_mime:

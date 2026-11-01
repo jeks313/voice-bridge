@@ -21,6 +21,9 @@
   #log { flex: 1; overflow-y: auto; padding: 8px 16px 16px; display: flex; flex-direction: column; gap: 10px; }
   .me { align-self: flex-end; background: #26344f; padding: 8px 12px; border-radius: 14px 14px 4px 14px; max-width: 85%; }
   .it { align-self: flex-start; background: var(--card); padding: 8px 12px; border-radius: 14px 14px 14px 4px; max-width: 90%; }
+  .resume { align-self: stretch; display: flex; align-items: center; gap: 10px; background: #1b2233; border: 1px solid #2c3a5a; border-radius: 12px; padding: 8px 12px; font-size: 14px; color: #b8c4e0; }
+  .resume button { margin-left: auto; background: var(--accent); color: #fff; border: 0; border-radius: 10px; padding: 8px 12px; font-size: 15px; font-weight: 600; }
+  .old { opacity: .75; }
   .file { align-self: flex-start; background: #1f2a1f; border: 1px solid #2f4a2f; padding: 8px 12px; border-radius: 12px; font-size: 15px; }
   .meta { align-self: center; font-size: 12px; color: var(--muted); }
   .err { align-self: center; font-size: 14px; color: #ff8a8a; }
@@ -40,7 +43,7 @@
 </style>
 </head>
 <body>
-<header><span class="dot" id="dot"></span><span id="state">Connecting...</span><button id="newconv">New</button></header>
+<header><span class="dot" id="dot"></span><span id="state">Connecting...</span><button id="newconv">New chat</button></header>
 <div id="log"></div>
 <footer>
   <div id="activity" style="min-height:1.2em;font-size:13px;color:var(--muted);text-align:center"></div>
@@ -58,7 +61,7 @@ function askKey() {
   const k = prompt("Pairing key (from ~/Data/voice-bridge/state/pairing-key on spiff):");
   if (k) { localStorage.voiceKey = k.trim(); location.href = "/?key=" + encodeURIComponent(k.trim()); }
 }
-let tools = {};
+let tools = {}, historyLoaded = false;
 let ws, rec, chunks = [], busy = false, ctx, playing = Promise.resolve(), stopGen = 0, nextIsAudio = false;
 
 function add(cls, text) {
@@ -100,6 +103,22 @@ function connect() {
     lastMsg = Date.now();
     if (typeof ev.data !== "string") { if (nextIsAudio) play(ev.data); nextIsAudio = false; return; }
     const m = JSON.parse(ev.data);
+    if (m.type === "ready" && !historyLoaded) { historyLoaded = true; ws.send(JSON.stringify({ type: "history" })); }
+    if (m.type === "history") {
+      $("log").innerHTML = "";
+      if (m.items.length) {
+        const bar = document.createElement("div"); bar.className = "resume";
+        bar.innerHTML = `<span>Picking up where you left off</span><button>New chat</button>`;
+        bar.querySelector("button").onclick = newChat;
+        $("log").appendChild(bar);
+        for (const it of m.items) {
+          add(it.role === "me" ? "me" : "it", it.text).classList.add("old");
+          for (const f of it.files || []) { const d = add("file", "File: " + f.split("/").slice(-2).join("/")); d.classList.add("old"); d.onclick = () => openFile(f); }
+        }
+        add("meta", "Earlier turns above · say something to carry on");
+      } else add("meta", "New conversation");
+      return;
+    }
     if (m.type === "ready" || m.type === "status") {
       const t = m.tts || "?";
       setState(t === "ready" ? "Voice ready" : t === "loading" ? "Voice loading (about 15 s)..." : "Voice: " + t,
@@ -180,7 +199,13 @@ $("typed").onkeydown = e => {
   add("me", e.target.value); ws.send(JSON.stringify({ type: "text", text: e.target.value })); e.target.value = ""; setBusy(true); lastMsg = Date.now();
 };
 $("stop").onclick = () => stopAudio();
-$("newconv").onclick = () => { if (confirm("Start a new conversation?")) { $("log").innerHTML = ""; ws.send(JSON.stringify({ type: "new_conversation" })); } };
+function newChat() {
+  if (busy || !connected()) return;
+  $("log").innerHTML = ""; add("meta", "Starting a new conversation...");
+  ws.send(JSON.stringify({ type: "new_conversation" }));
+  historyLoaded = false;  // the next "ready" reloads the (now empty) history
+}
+$("newconv").onclick = newChat;
 connect();
 </script>
 </body>

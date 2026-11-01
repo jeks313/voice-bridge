@@ -121,6 +121,43 @@ class HerdrBrain:
         self._sid = (a.get("agent_session") or {}).get("value")
         return a
 
+    async def history(self, limit=40):
+        """Recent turns of the voice session, oldest first: [{"role": "me"|"it", "text", "files"}]."""
+        a = await self.agent()
+        if not a:
+            return []
+        path = self._jsonl(a)
+        if not path.exists():
+            return []
+        items = []
+        for line in path.read_text(errors="replace").splitlines():
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            msg = ev.get("message") or {}
+            if ev.get("type") == "user" and not ev.get("isMeta"):
+                c = msg.get("content")
+                if isinstance(c, list) and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in c):
+                    continue  # tool output, not something Chris said
+                t = text_of(c).strip()
+                if not t or t.startswith("<") or t.startswith("/"):
+                    continue  # command echoes, caveats, slash commands
+                voice = t.startswith("[voice]")
+                items.append({"role": "me", "text": t[len("[voice]"):].strip() if voice else t, "voice": voice, "files": []})
+            elif ev.get("type") == "assistant":
+                for b in msg.get("content", []):
+                    if b.get("type") == "text" and b.get("text", "").strip():
+                        if items and items[-1]["role"] == "it":
+                            items[-1]["text"] += " " + b["text"].strip()
+                        else:
+                            items.append({"role": "it", "text": b["text"].strip(), "files": []})
+                    elif b.get("type") == "tool_use" and b.get("name") in FILE_TOOLS:
+                        fp = (b.get("input") or {}).get("file_path")
+                        if fp and items:
+                            items[-1].setdefault("files", []).append(fp)
+        return items[-limit:]
+
     async def start(self, new=False):
         a = await self._ensure()
         if new:
