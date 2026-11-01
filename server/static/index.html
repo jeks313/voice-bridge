@@ -71,11 +71,23 @@ function add(cls, text) {
 function setState(text, cls) { $("state").textContent = text; $("dot").className = "dot " + (cls || ""); }
 function setBusy(b) { busy = b; $("talk").classList.toggle("busy", b); $("talk").textContent = b ? "Thinking..." : "Tap to talk"; }
 
+// iOS puts the context in "interrupted" (not "suspended") after a screen lock,
+// and sometimes it never comes back; resume any non-running state from a tap,
+// and replace the context if it is closed or resume fails.
 function audioCtx() {
-  if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
-  if (ctx.state === "suspended") ctx.resume();
+  if (!ctx || ctx.state === "closed") ctx = new (window.AudioContext || window.webkitAudioContext)();
+  if (ctx.state !== "running") {
+    ctx.resume().catch(() => {
+      try { ctx.close(); } catch (e) {}
+      ctx = new (window.AudioContext || window.webkitAudioContext)();
+      ctx.resume().catch(() => {});
+    });
+  }
   return ctx;
 }
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && ctx && ctx.state !== "running") ctx.resume().catch(() => {});
+});
 function chime(freq = 880, dur = 0.08) {
   const c = audioCtx(), o = c.createOscillator(), g = c.createGain();
   o.frequency.value = freq; g.gain.setValueAtTime(0.08, c.currentTime); g.gain.exponentialRampToValueAtTime(0.0001, c.currentTime + dur);
