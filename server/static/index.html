@@ -45,8 +45,13 @@
 <script>
 const $ = id => document.getElementById(id);
 const params = new URLSearchParams(location.search);
-if (params.get("key")) { localStorage.voiceKey = params.get("key"); history.replaceState(null, "", "/"); }
-const token = localStorage.voiceKey || "";
+// iOS gives a home-screen app its own storage, so keep ?key= in the URL: Add to Home Screen then saves it too.
+if (params.get("key")) localStorage.voiceKey = params.get("key");
+let token = localStorage.voiceKey || "";
+function askKey() {
+  const k = prompt("Pairing key (from ~/Data/voice-bridge/state/pairing-key on spiff):");
+  if (k) { localStorage.voiceKey = k.trim(); location.href = "/?key=" + encodeURIComponent(k.trim()); }
+}
 let ws, rec, chunks = [], busy = false, ctx, playing = Promise.resolve(), stopGen = 0, nextIsAudio = false;
 
 function add(cls, text) {
@@ -105,6 +110,7 @@ function connect() {
       if (t.first_audio !== undefined) add("meta", `heard ${t.transcript ?? "-"}s · first words ${t.first_token ?? "-"}s · first audio ${t.first_audio}s`);
     } else if (m.type === "error") {
       add("err", m.text); setBusy(false);
+      if (m.text === "bad token") { ws.onclose = null; askKey(); }
     }
   };
 }

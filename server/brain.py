@@ -28,7 +28,9 @@ class Brain:
 
     def _session(self, new=False):
         if not new and self.session_file.exists():
-            return json.loads(self.session_file.read_text())["id"], True
+            sid = json.loads(self.session_file.read_text())["id"]
+            # resume only if Claude has written that session's history; an ID nobody spoke into yet starts fresh
+            return sid, any(Path(os.path.expanduser("~/.claude/projects")).glob(f"*/{sid}.jsonl"))
         sid = str(uuid.uuid4())
         STATE.mkdir(parents=True, exist_ok=True)
         self.session_file.write_text(json.dumps({"id": sid}))
@@ -64,6 +66,12 @@ class Brain:
             except asyncio.TimeoutError:
                 self.proc.kill()
         self.proc = None
+
+    async def ensure(self):
+        """Start the session process ahead of the first turn, so its startup isn't on the clock."""
+        async with self.lock:
+            if not self.proc or self.proc.returncode is not None:
+                await self.start()
 
     async def turn(self, text: str):
         """Yield ("text", delta) and ("file", path) events, then ("done", result)."""

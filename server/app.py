@@ -83,6 +83,8 @@ async def run_turn(ws, text, timing):
             for s in splitter.flush():
                 await queue.put(s)
             timing["result"] = val
+            if val.get("error") or val.get("is_error"):
+                await ws.send_json({"type": "error", "text": f"Claude: {val.get('error') or val.get('result')}"})
     await queue.put(None)
     await spk
     timing["done"] = time.time()
@@ -109,6 +111,7 @@ async def ws_handler(request):
                     await ws.send_json({"type": "error", "text": "bad token"})
                     break
                 state = await tts.warm()
+                asyncio.create_task(brain.ensure())
                 await ws.send_json({"type": "ready", "tts": state, "session": brain.session_id})
             elif not authed:
                 break
@@ -118,7 +121,8 @@ async def ws_handler(request):
                 timing = {"end_of_speech": time.time()}
                 await turn(ws, m["text"], timing)
             elif m["type"] == "new_conversation":
-                sid = await brain.start(new=True)
+                async with brain.lock:
+                    sid = await brain.start(new=True)
                 await ws.send_json({"type": "ready", "tts": await tts.status(), "session": sid})
             elif m["type"] == "status":
                 await ws.send_json({"type": "status", "tts": await tts.status()})
