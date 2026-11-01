@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Voice bench recorder</title>
+<style>
+  :root { color-scheme: light dark; --accent: #d9534f; }
+  body { font: 18px/1.45 -apple-system, system-ui, sans-serif; margin: 0; padding: 20px 18px 40px; max-width: 640px; margin-inline: auto; }
+  h1 { font-size: 17px; font-weight: 600; opacity: .7; margin: 0 0 14px; }
+  #prompt { font-size: 24px; line-height: 1.35; min-height: 5.5em; margin: 8px 0 18px; }
+  #kind { font-size: 14px; text-transform: uppercase; letter-spacing: .06em; opacity: .6; }
+  #rec { width: 100%; height: 110px; border-radius: 22px; border: 0; font-size: 22px; font-weight: 600; background: #2f6fde; color: #fff; }
+  #rec.on { background: var(--accent); }
+  .row { display: flex; gap: 10px; margin-top: 12px; }
+  .row button { flex: 1; height: 52px; border-radius: 14px; border: 1px solid #8884; background: transparent; font-size: 17px; color: inherit; }
+  #status { margin-top: 14px; min-height: 1.4em; font-size: 15px; opacity: .8; }
+  #dots { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 18px; }
+  #dots span { width: 22px; height: 22px; border-radius: 6px; background: #8883; font-size: 10px; display: grid; place-items: center; }
+  #dots span.done { background: #3a9d5d; color: #fff; }
+  #dots span.cur { outline: 2px solid #2f6fde; }
+  audio { width: 100%; margin-top: 12px; }
+</style>
+</head>
+<body>
+<h1>Voice bench: read each line naturally, at your normal pace</h1>
+<div id="kind"></div>
+<div id="prompt">Loading...</div>
+<button id="rec">Tap to record</button>
+<div class="row"><button id="prev">Back</button><button id="play">Play last</button><button id="next">Skip</button></div>
+<div id="status"></div>
+<audio id="player" controls hidden></audio>
+<div id="dots"></div>
+<script>
+let prompts = [], i = 0, rec = null, chunks = [], lastUrl = null;
+const $ = id => document.getElementById(id);
+function render() {
+  const p = prompts[i];
+  $("kind").textContent = (p.kind === "read" ? "Read aloud" : "Say it your way") + `  ${i + 1} / ${prompts.length}`;
+  $("prompt").textContent = p.kind === "read" ? p.text : p.text.replace(/^Free: /, "");
+  $("dots").innerHTML = prompts.map((q, k) => `<span class="${q.done ? "done" : ""} ${k === i ? "cur" : ""}">${k + 1}</span>`).join("");
+  [...$("dots").children].forEach((el, k) => el.onclick = () => { if (!rec) { i = k; render(); } });
+}
+async function load() {
+  prompts = await (await fetch("/api/prompts")).json();
+  const first = prompts.findIndex(p => !p.done);
+  i = first < 0 ? 0 : first;
+  render();
+}
+async function start() {
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: true } });
+  const type = ["audio/webm;codecs=opus", "audio/mp4", "audio/webm"].find(t => MediaRecorder.isTypeSupported(t)) || "";
+  rec = new MediaRecorder(stream, type ? { mimeType: type } : {});
+  chunks = [];
+  rec.ondataavailable = e => e.data.size && chunks.push(e.data);
+  rec.onstop = upload;
+  rec.start();
+  $("rec").classList.add("on"); $("rec").textContent = "Tap to stop and save";
+  $("status").textContent = "Recording...";
+}
+function stop() { rec.stop(); rec.stream.getTracks().forEach(t => t.stop()); }
+async function upload() {
+  const blob = new Blob(chunks, { type: rec.mimeType || "audio/mp4" });
+  rec = null;
+  $("rec").classList.remove("on"); $("rec").textContent = "Tap to record";
+  if (lastUrl) URL.revokeObjectURL(lastUrl);
+  lastUrl = URL.createObjectURL(blob); $("player").src = lastUrl;
+  $("status").textContent = "Saving...";
+  const r = await fetch(`/api/clip/${prompts[i].id}`, { method: "POST", headers: { "Content-Type": blob.type.split(";")[0] }, body: blob });
+  if (!r.ok) { $("status").textContent = `Save failed (${r.status}); tap record to try again.`; return; }
+  prompts[i].done = true;
+  $("status").textContent = `Saved ${(blob.size / 1024).toFixed(0)} KB. Re-record anytime by going back.`;
+  if (i < prompts.length - 1) i++;
+  render();
+}
+$("rec").onclick = () => (rec ? stop() : start().catch(e => $("status").textContent = "Mic error: " + e.message));
+$("next").onclick = () => { if (!rec && i < prompts.length - 1) { i++; render(); } };
+$("prev").onclick = () => { if (!rec && i > 0) { i--; render(); } };
+$("play").onclick = () => { if (lastUrl) { $("player").hidden = false; $("player").play(); } };
+load();
+</script>
+</body>
+</html>

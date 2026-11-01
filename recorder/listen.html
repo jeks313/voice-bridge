@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Voice bench: listen</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 17px/1.4 -apple-system, system-ui, sans-serif; margin: 0; padding: 18px; max-width: 640px; margin-inline: auto; }
+  h1 { font-size: 18px; margin: 0 0 6px; } p { margin: 0 0 16px; opacity: .7; font-size: 15px; }
+  .clip { border: 1px solid #8884; border-radius: 14px; padding: 12px; margin-bottom: 12px; }
+  .name { font-weight: 600; margin-bottom: 6px; } audio { width: 100%; }
+  .stars { display: flex; gap: 6px; margin-top: 8px; }
+  .stars button { flex: 1; height: 42px; border-radius: 10px; border: 1px solid #8884; background: transparent; color: inherit; font-size: 16px; }
+  .stars button.on { background: #2f6fde; color: #fff; border-color: #2f6fde; }
+</style>
+</head>
+<body>
+<h1>Which voice sounds most natural?</h1>
+<p>Rate each 1 (robotic) to 5 (a person). Ratings save as you tap.</p>
+<div id="list">Loading...</div>
+<script>
+fetch("/api/tts").then(r => r.json()).then(files => {
+  const list = document.getElementById("list");
+  list.innerHTML = files.length ? "" : "No samples yet.";
+  for (const f of files) {
+    const d = document.createElement("div"); d.className = "clip";
+    d.innerHTML = `<div class="name">${f.replace(/\.wav$/, "")}</div><audio controls preload="none" src="/tts/${f}"></audio>
+      <div class="stars">${[1,2,3,4,5].map(n => `<button data-n="${n}">${n}</button>`).join("")}</div>`;
+    d.querySelectorAll("button").forEach(b => b.onclick = async () => {
+      d.querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
+      await fetch("/api/pick", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ file: f, score: +b.dataset.n }) });
+    });
+    list.appendChild(d);
+  }
+});
+</script>
+</body>
+</html>
