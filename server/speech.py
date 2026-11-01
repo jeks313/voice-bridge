@@ -143,10 +143,16 @@ def pace(wav_bytes: bytes) -> bytes:
     sr = w.getframerate()
     pcm = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
     pcm = cap_pauses(pcm, sr, PAUSE_CAP_MS)
-    out = subprocess.run(["ffmpeg", "-loglevel", "error", "-f", "s16le", "-ar", str(sr), "-ac", "1", "-i", "pipe:0",
-                          "-filter:a", f"atempo={TEMPO}", "-f", "wav", "pipe:1"],
+    raw = subprocess.run(["ffmpeg", "-loglevel", "error", "-f", "s16le", "-ar", str(sr), "-ac", "1", "-i", "pipe:0",
+                          "-filter:a", f"atempo={TEMPO}", "-f", "s16le", "pipe:1"],
                          input=pcm.tobytes(), capture_output=True, check=True).stdout
-    return out
+    buf = io.BytesIO()  # wrap it ourselves: a piped ffmpeg WAV carries a placeholder length
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sr)
+        w.writeframes(raw)
+    return buf.getvalue()
 
 
 class TTS:

@@ -1,4 +1,9 @@
-"""Load-on-demand front for `drama serve` on khelt (WSL).
+"""Load-on-demand front for the voice bridge's TTS engine on khelt (WSL).
+
+ENGINE picks what it starts: "chatterbox-turbo" (default since 2026-11-01:
+about 3 GB of VRAM, so Windows doesn't page it out beside the desktop) or
+"drama" (Drama 3 int4, 21 GB). Both serve the same /health and /v1/speak.
+
 
 Listens on 127.0.0.1:8091 (published to the tailnet by `tailscale serve` on
 Windows). Starts Drama 3 on the first request or POST /warm, proxies /v1/*
@@ -29,7 +34,9 @@ VOICES = os.environ.get("VOICES_DIR", f"{HOME}/Data/voice-bridge/voices")
 UP_PORT = int(os.environ.get("DRAMA_PORT", "8090"))
 LISTEN = ("127.0.0.1", int(os.environ.get("PORT", "8091")))
 IDLE_SECS = int(os.environ.get("IDLE_SECS", "600"))
-LOAD_TIMEOUT = 120
+LOAD_TIMEOUT = 240
+ENGINE = os.environ.get("ENGINE", "chatterbox-turbo")
+HERE = os.path.dirname(os.path.abspath(__file__))
 
 lock = threading.Lock()
 proc = None
@@ -55,9 +62,12 @@ def start():
             return
         ready.clear()
         state = "loading"
-        cmd = [DRAMA, "serve", "--model", MODEL, "--experts", "q4", "--addr", f"127.0.0.1:{UP_PORT}",
-               "--max-len", "2048", *voice_args()]
-        log = open(f"{HOME}/voice-bench/drama-serve.log", "ab")
+        if ENGINE == "drama":
+            cmd = [DRAMA, "serve", "--model", MODEL, "--experts", "q4", "--addr", f"127.0.0.1:{UP_PORT}",
+                   "--max-len", "2048", *voice_args()]
+        else:
+            cmd = ["uv", "run", "-q", os.path.join(HERE, "chatterbox_serve.py"), "--port", str(UP_PORT)]
+        log = open(f"{HOME}/voice-bench/{ENGINE}-serve.log", "ab")
         proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, cwd=f"{HOME}/voice-bench")
         threading.Thread(target=wait_ready, args=(proc,), daemon=True).start()
 
@@ -112,7 +122,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/status":
-            return self._json(200, {"state": state, "idle_for": round(time.time() - last_use)})
+            return self._json(200, {"state": state, "engine": ENGINE, "idle_for": round(time.time() - last_use)})
         self.proxy()
 
     def do_POST(self):
