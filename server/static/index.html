@@ -93,8 +93,9 @@ function connect() {
   ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
   ws.binaryType = "arraybuffer";
   ws.onopen = () => ws.send(JSON.stringify({ type: "hello", token }));
-  ws.onclose = () => { setState("Disconnected, retrying...", ""); setTimeout(connect, 1500); };
+  ws.onclose = () => { setState("Disconnected, retrying...", ""); if (busy) { setBusy(false); add("err", "Connection dropped; that turn may not have arrived."); } setTimeout(connect, 1500); };
   ws.onmessage = ev => {
+    lastMsg = Date.now();
     if (typeof ev.data !== "string") { if (nextIsAudio) play(ev.data); nextIsAudio = false; return; }
     const m = JSON.parse(ev.data);
     if (m.type === "ready" || m.type === "status") {
@@ -148,7 +149,8 @@ async function startRec() {
   rec.onstop = async () => {
     stream.getTracks().forEach(t => t.stop());
     const blob = new Blob(chunks, { type: rec.mimeType || "audio/mp4" }); rec = null;
-    chime(660); setBusy(true);
+    if (!connected()) return;
+    chime(660); setBusy(true); lastMsg = Date.now();
     ws.send(JSON.stringify({ type: "utterance", mime: blob.type }));
     ws.send(await blob.arrayBuffer());
   };
@@ -160,10 +162,17 @@ $("talk").onclick = () => {
   if (rec) { $("talk").classList.remove("rec"); rec.stop(); }
   else startRec().catch(e => add("err", "Mic: " + e.message));
 };
+function connected() {
+  if (ws && ws.readyState === 1) return true;
+  add("err", "Not connected yet, try again in a moment."); return false;
+}
+// a turn that goes silent for two minutes releases the button instead of sticking on "Thinking..."
+let lastMsg = Date.now();
+setInterval(() => { if (busy && Date.now() - lastMsg > 120000) { setBusy(false); add("err", "No reply for two minutes; the button is free again."); } }, 5000);
 $("typed").onkeydown = e => {
-  if (e.key !== "Enter" || !e.target.value.trim() || busy) return;
+  if (e.key !== "Enter" || !e.target.value.trim() || busy || !connected()) return;
   audioCtx(); stopAudio();
-  add("me", e.target.value); ws.send(JSON.stringify({ type: "text", text: e.target.value })); e.target.value = ""; setBusy(true);
+  add("me", e.target.value); ws.send(JSON.stringify({ type: "text", text: e.target.value })); e.target.value = ""; setBusy(true); lastMsg = Date.now();
 };
 $("stop").onclick = () => stopAudio();
 $("newconv").onclick = () => { if (confirm("Start a new conversation?")) { $("log").innerHTML = ""; ws.send(JSON.stringify({ type: "new_conversation" })); } };
