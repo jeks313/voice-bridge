@@ -85,8 +85,14 @@ function audioCtx() {
   }
   return ctx;
 }
+// WebKit can also leave a context that reports "running" but plays silence after
+// a lock, so throw the context away whenever the page is hidden; the next tap
+// (a user gesture) builds a fresh one.
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && ctx && ctx.state !== "running") ctx.resume().catch(() => {});
+  if (document.visibilityState !== "hidden" || !ctx) return;
+  stopAudio();
+  try { ctx.close(); } catch (e) {}
+  ctx = null;
 });
 function chime(freq = 880, dur = 0.08) {
   const c = audioCtx(), o = c.createOscillator(), g = c.createGain();
