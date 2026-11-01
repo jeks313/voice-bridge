@@ -24,6 +24,11 @@
   .file { align-self: flex-start; background: #1f2a1f; border: 1px solid #2f4a2f; padding: 8px 12px; border-radius: 12px; font-size: 15px; }
   .meta { align-self: center; font-size: 12px; color: var(--muted); }
   .err { align-self: center; font-size: 14px; color: #ff8a8a; }
+  .perm { align-self: stretch; background: #2a2414; border: 1px solid #6b5520; border-radius: 14px; padding: 10px 12px; }
+  .perm.risky { background: #2e1616; border-color: #7a2b2b; }
+  .perm .what { font-weight: 600; margin-bottom: 4px; } .perm code { display: block; font-size: 13px; color: #d8c79a; white-space: pre-wrap; word-break: break-all; margin: 4px 0 8px; }
+  .perm .btns { display: flex; gap: 8px; } .perm button { flex: 1; height: 46px; border-radius: 12px; border: 0; font-size: 17px; font-weight: 600; }
+  .perm .ok { background: #2f8f4e; color: #fff; } .perm .no { background: #3a3f4d; color: #fff; } .perm.done { opacity: .55; }
   footer { padding: 10px 16px 14px; display: flex; flex-direction: column; gap: 10px; }
   #talk { height: 96px; border-radius: 26px; border: 0; background: var(--accent); color: #fff; font-size: 21px; font-weight: 600; touch-action: manipulation; }
   #talk.rec { background: var(--rec); } #talk.busy { background: #333a4d; color: #aab; }
@@ -104,6 +109,19 @@ function connect() {
     } else if (m.type === "file") {
       const d = add("file", "File: " + m.path.split("/").slice(-2).join("/"));
       d.onclick = () => openFile(m.path);
+    } else if (m.type === "permission") {
+      const d = document.createElement("div"); d.className = "perm" + (m.risky ? " risky" : ""); d.id = "perm-" + m.id;
+      d.innerHTML = `<div class="what"></div><code></code><div class="btns"><button class="ok">Approve</button><button class="no">Deny</button></div>`;
+      d.querySelector(".what").textContent = (m.risky ? "Needs a tap: " : "") + (m.desc || m.tool);
+      d.querySelector("code").textContent = m.detail;
+      const answer = a => { ws.send(JSON.stringify({ type: "permission_answer", id: m.id, answer: a })); d.querySelectorAll("button").forEach(b => b.disabled = true); };
+      d.querySelector(".ok").onclick = () => answer("approve"); d.querySelector(".no").onclick = () => answer("deny");
+      $("log").appendChild(d); $("log").scrollTop = $("log").scrollHeight;
+      setBusy(false); $("talk").textContent = "Answer: tap to talk";
+    } else if (m.type === "permission_done") {
+      const d = $("perm-" + m.id);
+      if (d) { d.classList.add("done"); d.querySelector(".btns").textContent = m.answer === "approve" ? "Approved" : m.answer === "deny" ? "Denied" : "Left for the desk"; }
+      setBusy(true);
     } else if (m.type === "turn_done") {
       setBusy(false);
       const t = m.timing || {};

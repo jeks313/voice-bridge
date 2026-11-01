@@ -14,6 +14,8 @@ import json
 import os
 from pathlib import Path
 
+import permission
+
 NAME = os.environ.get("HERDR_AGENT", "voice")
 CWD = os.environ.get("BRAIN_CWD", os.path.expanduser("~/Data/knowledge"))
 MODEL = os.environ.get("BRAIN_MODEL", "opus")
@@ -38,6 +40,16 @@ async def herdr(*args, timeout=90):
     if "error" in d:
         raise HerdrError(f"herdr {' '.join(args[:2])}: {d['error'].get('code')}: {d['error'].get('message')}")
     return d.get("result", {})
+
+
+async def herdr_text(*args, timeout=30):
+    """For commands that print plain text (agent read)."""
+    p = await asyncio.create_subprocess_exec("herdr", *args, stdout=asyncio.subprocess.PIPE,
+                                             stderr=asyncio.subprocess.PIPE)
+    out, err = await asyncio.wait_for(p.communicate(), timeout)
+    if p.returncode:
+        raise HerdrError(f"herdr {' '.join(args[:2])}: {err.decode(errors='replace')[:200]}")
+    return out.decode(errors="replace")
 
 
 def text_of(content):
@@ -138,7 +150,28 @@ class HerdrBrain:
             return found[0]
         return PROJECTS / ("-" + a["cwd"].strip("/").replace("/", "-").replace(".", "-")) / f"{sid}.jsonl"
 
-    async def turn(self, text: str):
+    async def answer_permission(self, ask):
+        """The pane is blocked: read the dialog, ask Chris, press the answer. Returns what happened."""
+        screen = await herdr_text("agent", "read", NAME, "--source", "visible", "--lines", "80")
+        p = permission.parse(screen)
+        if not p:
+            return "unreadable"
+        answer = await ask(p)
+        if answer == "approve":
+            if not p["cursor_on_yes"]:
+                return "cursor not on Yes; left for the desk"
+            await herdr("agent", "send-keys", NAME, "Enter")
+        elif answer == "deny":
+            await herdr("agent", "send-keys", NAME, "esc")
+        else:
+            return "no answer; left for the desk"
+        for _ in range(40):  # the dialog takes a moment to clear
+            await asyncio.sleep(0.25)
+            if (await self.agent() or {}).get("agent_status") != "blocked":
+                break
+        return answer
+
+    async def turn(self, text: str, ask=None):
         """Yield ("text", block), ("file", path), ("notice", msg) and finally ("done", info)."""
         async with self.lock:
             a = await self._ensure()
@@ -192,9 +225,16 @@ class HerdrBrain:
                     continue
                 await asyncio.sleep(0.15)
                 status = (await self.agent() or {}).get("agent_status")
-                if status == "blocked" and not told_blocked:
-                    told_blocked = True
-                    yield "notice", "It's waiting for your permission in the herdr pane."
+                if status != "blocked":
+                    told_blocked = False  # a later prompt in this turn gets asked again
+                elif ask and not told_blocked:
+                    result = await self.answer_permission(ask)
+                    if result not in ("approve", "deny"):
+                        told_blocked = True  # say it once, then leave it for the desk
+                        yield "notice", f"Permission prompt {result}."
+                elif not told_blocked:
+                        told_blocked = True
+                        yield "notice", "It's waiting for your permission in the herdr pane."
                 if status in READY and seen_prompt and (said or loop.time() - started > 5):
                     quiet_since = quiet_since or loop.time()
                     if loop.time() - quiet_since > 0.4:  # settled: no new lines after the agent went idle

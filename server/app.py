@@ -13,12 +13,14 @@ import asyncio
 import json
 import os
 import time
+import uuid
 from pathlib import Path
 
 from aiohttp import WSMsgType, web
 
 from brain import Brain
 from herdr_brain import HerdrBrain
+import permission
 from speech import STT, TTS, GLOSSARY, SentenceSplitter
 
 APP = Path(__file__).parent
@@ -49,7 +51,39 @@ stt = STT()
 tts = TTS()
 
 
-async def run_turn(ws, text, timing):
+class Conn:
+    """One phone connection: serialised sends, at most one turn running, at most one permission pending."""
+
+    def __init__(self, ws):
+        self.ws = ws
+        self.lock = asyncio.Lock()
+        self.turn_task = None
+        self.pending = None  # {"id", "info", "fut"} while a permission prompt waits for Chris
+
+    async def send(self, obj):
+        async with self.lock:
+            await self.ws.send_json(obj)
+
+    async def say(self, text, seq, audio):
+        async with self.lock:  # the "say" frame and its WAV must stay adjacent
+            await self.ws.send_json({"type": "say", "text": text, "seq": seq, "audio": bool(audio)})
+            if audio:
+                await self.ws.send_bytes(audio)
+
+    async def speak_now(self, text):
+        """Speak a line outside a turn (e.g. "say yes or no")."""
+        try:
+            audio = await tts.speak(text)
+        except Exception:
+            audio = None
+        await self.say(text, -1, audio)
+
+    @property
+    def busy(self):
+        return self.turn_task is not None and not self.turn_task.done()
+
+
+async def run_turn(conn, text, timing):
     """Send one user turn to Claude and stream spoken sentences back as they complete."""
     splitter = SentenceSplitter()
     queue: asyncio.Queue = asyncio.Queue()
@@ -64,34 +98,54 @@ async def run_turn(ws, text, timing):
                     audio = await tts.speak(sentence)
                 except Exception as e:  # keep the turn going; the text still shows on screen
                     tts_ok = False
-                    await ws.send_json({"type": "error", "text": f"Voice unavailable ({e.__class__.__name__}); showing text only"})
-            await ws.send_json({"type": "say", "text": sentence, "seq": seq, "audio": bool(audio)})
-            if audio:
-                if seq == 0:
-                    timing["first_audio"] = time.time()
-                await ws.send_bytes(audio)
+                    await conn.send({"type": "error", "text": f"Voice unavailable ({e.__class__.__name__}); showing text only"})
+            if audio and seq == 0:
+                timing["first_audio"] = time.time()
+            await conn.say(sentence, seq, audio)
             seq += 1
 
+    async def ask(p):
+        """Called by the brain when the pane shows a permission prompt."""
+        pid = uuid.uuid4().hex[:8]
+        fut = asyncio.get_running_loop().create_future()
+        conn.pending = {"id": pid, "info": p, "fut": fut}
+        asyncio.create_task(speak_question(conn, pid, permission.summary(p)))  # now, not behind the reply's queue
+        await conn.send({"type": "permission", "id": pid, "summary": permission.summary(p), "tool": p["tool"],
+                         "detail": p["detail"], "desc": p["desc"], "risky": p["risky"]})
+        try:
+            answer = await asyncio.wait_for(fut, 300)
+        except asyncio.TimeoutError:
+            answer = None
+        finally:
+            conn.pending = None
+        await conn.send({"type": "permission_done", "id": pid, "answer": answer})
+        if answer == "deny":
+            await queue.put("Okay, denied.")  # Claude usually goes quiet after a rejection
+        log_event({"permission": p["tool"], "detail": p["detail"], "risky": p["risky"], "answer": answer})
+        return answer
+
     spk = asyncio.create_task(speaker())
-    async for kind, val in brain.turn(text):
-        if kind == "text":
-            timing.setdefault("first_token", time.time())
-            for s in splitter.feed(val):
-                await queue.put(s)
-        elif kind == "notice":
-            await ws.send_json({"type": "error", "text": val})
-            await queue.put(val)
-        elif kind == "file":
-            files.append(val)
-            await ws.send_json({"type": "file", "path": val})
-        elif kind == "done":
-            for s in splitter.flush():
-                await queue.put(s)
-            timing["result"] = val
-            if val.get("error") or val.get("is_error"):
-                await ws.send_json({"type": "error", "text": f"Claude: {val.get('error') or val.get('result')}"})
-    await queue.put(None)
-    await spk
+    try:
+        async for kind, val in brain.turn(text, ask=ask) if isinstance(brain, HerdrBrain) else brain.turn(text):
+            if kind == "text":
+                timing.setdefault("first_token", time.time())
+                for s in splitter.feed(val):
+                    await queue.put(s)
+            elif kind == "notice":
+                await conn.send({"type": "error", "text": val})
+                await queue.put(val)
+            elif kind == "file":
+                files.append(val)
+                await conn.send({"type": "file", "path": val})
+            elif kind == "done":
+                for s in splitter.flush():
+                    await queue.put(s)
+                timing["result"] = val
+                if val.get("error") or val.get("is_error"):
+                    await conn.send({"type": "error", "text": f"Claude: {val.get('error') or val.get('result')}"})
+    finally:
+        await queue.put(None)
+        await spk
     timing["done"] = time.time()
     return files
 
@@ -102,9 +156,52 @@ def summarize(timing):
     return {**rel, "duration_ms": (timing.get("result") or {}).get("duration_ms")}
 
 
+def log_event(obj):
+    with open(LOG, "a") as f:
+        f.write(json.dumps({"at": time.time(), "session": brain.session_id, **obj}) + "\n")
+
+
+async def speak_question(conn, pid, text):
+    """Speak a permission question at once; drop it if it was answered while the audio rendered."""
+    try:
+        audio = await tts.speak(text)
+    except Exception:
+        audio = None
+    if conn.pending and conn.pending["id"] == pid:
+        await conn.say(text, -1, audio)
+
+
+async def answer_pending(conn, answer, by):
+    """Resolve the pending permission prompt. Risky prompts only take a tap."""
+    p = conn.pending
+    if not p or p["fut"].done():
+        return False
+    if answer == "approve" and p["info"]["risky"] and by != "tap":
+        await conn.speak_now("That one needs a tap on the screen.")
+        return True
+    p["fut"].set_result(answer)
+    return True
+
+
+async def handle_input(conn, text, timing, by):
+    """A finished utterance or typed line: a permission answer, or a new turn."""
+    if conn.pending:
+        answer = permission.answer_of(text)
+        if answer:
+            await answer_pending(conn, answer, by)
+        else:
+            await conn.speak_now("Say yes or no.")
+        return
+    if conn.busy:
+        await conn.send({"type": "error", "text": "Still working on the last one."})
+        return
+    conn.turn_task = asyncio.create_task(turn(conn, text, timing))
+
+
 async def ws_handler(request):
     ws = web.WebSocketResponse(max_msg_size=32 * 1024 * 1024, heartbeat=30)
     await ws.prepare(request)
+    conn = Conn(ws)
     authed = not TOKEN
     pending_mime = None
     async for msg in ws:
@@ -113,53 +210,61 @@ async def ws_handler(request):
             if m["type"] == "hello":
                 authed = authed or m.get("token") == TOKEN
                 if not authed:
-                    await ws.send_json({"type": "error", "text": "bad token"})
+                    await conn.send({"type": "error", "text": "bad token"})
                     break
                 state = await tts.warm()
                 asyncio.create_task(brain.ensure())
-                await ws.send_json({"type": "ready", "tts": state, "session": brain.session_id})
+                await conn.send({"type": "ready", "tts": state, "session": brain.session_id})
             elif not authed:
                 break
             elif m["type"] == "utterance":
                 pending_mime = m.get("mime", "audio/mp4")
             elif m["type"] == "text":
-                timing = {"end_of_speech": time.time()}
-                await turn(ws, m["text"], timing)
+                await handle_input(conn, m["text"], {"end_of_speech": time.time()}, "typed")
+            elif m["type"] == "permission_answer":
+                if conn.pending and conn.pending["id"] == m.get("id"):
+                    await answer_pending(conn, m.get("answer"), "tap")
             elif m["type"] == "new_conversation":
+                if conn.busy:
+                    await conn.send({"type": "error", "text": "Still working on the last one."})
+                    continue
                 async with brain.lock:
                     sid = await brain.start(new=True)
-                await ws.send_json({"type": "ready", "tts": await tts.status(), "session": sid})
+                await conn.send({"type": "ready", "tts": await tts.status(), "session": sid})
             elif m["type"] == "status":
-                await ws.send_json({"type": "status", "tts": await tts.status()})
+                await conn.send({"type": "status", "tts": await tts.status()})
         elif msg.type == WSMsgType.BINARY and authed and pending_mime:
             timing = {"end_of_speech": time.time()}
             pending_mime = None
             try:
                 text = await stt.transcribe(msg.data)
             except Exception as e:
-                await ws.send_json({"type": "error", "text": f"speech recognition failed: {e}"})
-                await ws.send_json({"type": "turn_done", "timing": summarize(timing), "empty": True})
+                await conn.send({"type": "error", "text": f"speech recognition failed: {e}"})
+                await conn.send({"type": "turn_done", "timing": summarize(timing), "empty": True})
                 continue
             timing["transcript"] = time.time()
-            await ws.send_json({"type": "transcript", "text": text})
+            await conn.send({"type": "transcript", "text": text})
             if text:
-                await turn(ws, text, timing)
-            else:
-                await ws.send_json({"type": "turn_done", "timing": summarize(timing), "empty": True})
+                await handle_input(conn, text, timing, "voice")
+            elif not conn.pending:
+                await conn.send({"type": "turn_done", "timing": summarize(timing), "empty": True})
+    if conn.pending and not conn.pending["fut"].done():
+        conn.pending["fut"].set_result(None)  # phone went away: leave the prompt for the desk
     return ws
 
 
-async def turn(ws, text, timing):
+async def turn(conn, text, timing):
     try:
-        files = await run_turn(ws, text, timing)
+        files = await run_turn(conn, text, timing)
     except Exception as e:
-        await ws.send_json({"type": "error", "text": f"turn failed: {e}"})
+        await conn.send({"type": "error", "text": f"turn failed: {e}"})
         files = []
     summary = summarize(timing)
-    await ws.send_json({"type": "turn_done", "timing": summary, "files": files})
-    with open(LOG, "a") as f:
-        f.write(json.dumps({"at": time.time(), "text": text, "files": files, "timing": summary,
-                            "session": brain.session_id}) + "\n")
+    try:
+        await conn.send({"type": "turn_done", "timing": summary, "files": files})
+    except Exception:
+        pass  # the phone may have gone; the turn still completed in herdr
+    log_event({"text": text, "files": files, "timing": summary})
     print("turn", json.dumps(summary), flush=True)
 
 
