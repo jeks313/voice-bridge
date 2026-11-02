@@ -119,9 +119,11 @@ document.addEventListener("visibilitychange", () => {
   try { ctx.close(); } catch (e) {}
   ctx = null;
 });
-function chime(freq = 880, dur = 0.08) {
+function chime(freq = 880, dur = 0.16) {
+  // loud enough to hear outdoors with the phone at arm's length (was 0.08 gain, 80 ms: easy to miss)
   const c = audioCtx(), o = c.createOscillator(), g = c.createGain();
-  o.frequency.value = freq; g.gain.setValueAtTime(0.08, c.currentTime); g.gain.exponentialRampToValueAtTime(0.0001, c.currentTime + dur);
+  o.type = "triangle"; o.frequency.value = freq;
+  g.gain.setValueAtTime(0.45, c.currentTime); g.gain.exponentialRampToValueAtTime(0.0001, c.currentTime + dur);
   o.connect(g).connect(c.destination); o.start(); o.stop(c.currentTime + dur);
 }
 function play(buf) {
