@@ -38,6 +38,7 @@
   #talk.rec { background: var(--rec); } #talk.busy { background: #333a4d; color: #aab; }
   .row { display: flex; gap: 8px; }
   .row input { flex: 1; background: var(--card); border: 1px solid #2c3140; color: inherit; border-radius: 12px; padding: 10px 12px; font-size: 16px; }
+  #mode.on { border-color: var(--accent); color: #c9d6ff; }
   .row button { background: var(--card); border: 1px solid #2c3140; color: inherit; border-radius: 12px; padding: 0 14px; font-size: 15px; }
   header #topicbtn { margin-left: auto; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   header #topicbtn + #newconv { margin-left: 0; }
@@ -57,7 +58,7 @@
 <footer>
   <div id="activity" style="min-height:1.2em;font-size:13px;color:var(--muted);text-align:center"></div>
   <button id="talk">Tap to talk</button>
-  <div class="row"><input id="typed" placeholder="Or type..." enterkeyhint="send"><button id="stop">Stop</button></div>
+  <div class="row"><input id="typed" placeholder="Or type..." enterkeyhint="send"><button id="mode"></button><button id="stop">Stop</button></div>
 </footer>
 <div id="topics"><header><span>Chats</span><button id="tclose" style="margin-left:auto">Close</button></header><div id="tlist"></div></div>
 <div id="viewer"><header><span id="vname"></span><button id="vclose">Close</button></header><pre id="vbody"></pre></div>
@@ -185,13 +186,14 @@ function connect() {
       const answer = a => { ws.send(JSON.stringify({ type: "permission_answer", id: m.id, answer: a })); d.querySelectorAll("button").forEach(b => b.disabled = true); };
       d.querySelector(".ok").onclick = () => answer("approve"); d.querySelector(".no").onclick = () => answer("deny");
       $("log").appendChild(d); $("log").scrollTop = $("log").scrollHeight;
-      setBusy(false); $("talk").textContent = "Answer: tap to talk";
+      setBusy(false); $("talk").textContent = "Answer: tap to talk"; relisten();
     } else if (m.type === "permission_done") {
       const d = $("perm-" + m.id);
       if (d) { d.classList.add("done"); d.querySelector(".btns").textContent = m.answer === "approve" ? "Approved" : m.answer === "deny" ? "Denied" : "Left for the desk"; }
       setBusy(true);
     } else if (m.type === "turn_done") {
       setBusy(false); tools = {}; $("activity").textContent = "";
+      if (!m.empty) relisten(); else autoArmed = false;  // nothing heard: stop the loop until the next tap
       const t = m.timing || {};
       if (t.first_audio !== undefined) add("meta", `heard ${t.transcript ?? "-"}s · first words ${t.first_token ?? "-"}s · first audio ${t.first_audio}s`);
     } else if (m.type === "error") {
@@ -207,6 +209,46 @@ async function openFile(path) {
 }
 $("vclose").onclick = () => $("viewer").style.display = "none";
 
+// Auto mode: a pause ends the utterance and sends it, and the mic reopens after each reply.
+// Manual mode: tap to start, tap to send. A tap always sends straight away in either mode.
+let autoMode = localStorage.voiceMode !== "manual", autoArmed = false, vad = null;
+const SILENCE_MS = 2000, NO_SPEECH_MS = 8000;
+function showMode() { $("mode").textContent = autoMode ? "Auto send" : "Manual send"; $("mode").classList.toggle("on", autoMode); }
+$("mode").onclick = () => { autoMode = !autoMode; localStorage.voiceMode = autoMode ? "auto" : "manual"; if (!autoMode) autoArmed = false; showMode(); };
+showMode();
+
+async function relisten() {
+  if (!autoMode || !autoArmed) return;
+  let p;
+  do { p = playing; await p; } while (p !== playing);  // wait for the whole reply to finish playing
+  await new Promise(r => setTimeout(r, 250));
+  if (!autoMode || !autoArmed || busy || rec || document.visibilityState !== "visible") return;
+  startRec().catch(e => { autoArmed = false; add("err", "Mic: " + e.message + " (tap to talk)"); });
+}
+function stopRec(send) {
+  if (!rec) return;
+  if (vad) { clearInterval(vad); vad = null; }
+  rec.cancelled = !send;
+  $("talk").classList.remove("rec"); rec.stop();
+}
+function watchSilence(stream) {
+  // energy-based end of speech: calibrate on the first 300 ms, then wait for speech followed by a pause
+  const c = audioCtx(), src = c.createMediaStreamSource(stream), an = c.createAnalyser();
+  an.fftSize = 1024; src.connect(an);
+  const buf = new Float32Array(an.fftSize), t0 = Date.now();
+  let floor = 0, n = 0, spoke = false, loudMs = 0, quietSince = null;
+  vad = setInterval(() => {
+    an.getFloatTimeDomainData(buf);
+    let sum = 0; for (const v of buf) sum += v * v;
+    const rms = Math.sqrt(sum / buf.length), now = Date.now();
+    if (now - t0 < 300) { floor += rms; n++; return; }
+    const thr = Math.max((floor / Math.max(n, 1)) * 3, 0.012);
+    if (rms > thr) { loudMs += 50; quietSince = null; if (loudMs >= 250) spoke = true; }
+    else { loudMs = Math.max(0, loudMs - 25); quietSince = quietSince || now; }
+    if (spoke && quietSince && now - quietSince > SILENCE_MS) stopRec(true);
+    else if (!spoke && now - t0 > NO_SPEECH_MS) { autoArmed = false; stopRec(false); add("meta", "Didn't hear anything; tap to talk"); }
+  }, 50);
+}
 async function startRec() {
   audioCtx(); stopAudio();
   const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
@@ -215,20 +257,28 @@ async function startRec() {
   chunks = []; rec.ondataavailable = e => e.data.size && chunks.push(e.data);
   rec.onstop = async () => {
     stream.getTracks().forEach(t => t.stop());
+    const cancelled = rec.cancelled;
     const blob = new Blob(chunks, { type: rec.mimeType || "audio/mp4" }); rec = null;
-    if (!connected()) return;
+    $("talk").textContent = "Tap to talk";
+    if (cancelled || !connected()) return;
     chime(660); setBusy(true); lastMsg = Date.now();
     ws.send(JSON.stringify({ type: "utterance", mime: blob.type }));
     ws.send(await blob.arrayBuffer());
   };
   rec.start(); chime(880);
-  $("talk").classList.add("rec"); $("talk").textContent = "Listening... tap to send";
+  if (autoMode) watchSilence(stream);
+  $("talk").classList.add("rec");
+  $("talk").textContent = autoMode ? "Listening... pause to send, or tap" : "Listening... tap to send";
 }
 $("talk").onclick = () => {
   if (busy) return;
-  if (rec) { $("talk").classList.remove("rec"); rec.stop(); }
-  else startRec().catch(e => add("err", "Mic: " + e.message));
+  if (rec) stopRec(true);
+  else { autoArmed = autoMode; startRec().catch(e => add("err", "Mic: " + e.message)); }
 };
+// a hidden page can't hold the mic: drop any open recording and stop the loop
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") { autoArmed = false; stopRec(false); }
+});
 function connected() {
   if (ws && ws.readyState === 1) return true;
   add("err", "Not connected yet, try again in a moment."); return false;
@@ -241,7 +291,7 @@ $("typed").onkeydown = e => {
   audioCtx(); stopAudio();
   add("me", e.target.value); ws.send(JSON.stringify({ type: "text", text: e.target.value })); e.target.value = ""; setBusy(true); lastMsg = Date.now();
 };
-$("stop").onclick = () => stopAudio();
+$("stop").onclick = () => { autoArmed = false; stopRec(false); stopAudio(); };
 let topicList = [];
 function ago(t) {
   if (!t) return "never";
