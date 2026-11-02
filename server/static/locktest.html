@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lock test</title>
+<style>
+body { font: 16px/1.45 system-ui, sans-serif; margin: 0; padding: 20px; background: #111; color: #eee; }
+button { font: inherit; padding: 14px 20px; border-radius: 12px; border: 0; background: #e5484d; color: #fff; width: 100%; margin: 6px 0; }
+button.alt { background: #333; }
+label { display: block; margin: 12px 0; }
+pre { white-space: pre-wrap; font-size: 13px; background: #000; padding: 10px; border-radius: 8px; }
+</style>
+</head>
+<body>
+<h2>Locked-screen audio test</h2>
+<p>Tap Start, lock the phone, and listen for two minutes. Four clips play: one now, then new ones at 40 s, 80 s and 120 s, fetched over the network at that moment the way a real reply would be. Unlock and read the log.</p>
+<label><input type="checkbox" id="keep"> Keep-alive: loop silence between clips</label>
+<button id="start">Start</button>
+<button id="clear" class="alt">Clear log</button>
+<pre id="log"></pre>
+<script>
+// Plays through one HTML <audio> element (the current app uses Web Audio,
+// which iOS stops on lock). Every event is logged with the page's visibility,
+// so the log shows what happened while the screen was dark.
+const KEY = "locktest-log", T0 = { t: 0 };
+const el = new Audio(); el.preload = "auto"; el.playsInline = true;
+const log = msg => {
+  const s = T0.t ? ((Date.now() - T0.t) / 1000).toFixed(1) + "s" : "-";
+  const line = `${s} [${document.visibilityState}] ${msg}`;
+  const all = JSON.parse(localStorage.getItem(KEY) || "[]"); all.push(line);
+  localStorage.setItem(KEY, JSON.stringify(all)); show();
+};
+const show = () => { document.getElementById("log").textContent = JSON.parse(localStorage.getItem(KEY) || "[]").join("\n"); };
+["play", "playing", "pause", "ended", "stalled", "error"].forEach(e => el.addEventListener(e, () => {
+  if (el.dataset.name !== "silence" || e === "error") log(`${e} ${el.dataset.name}${e === "error" ? " " + (el.error && el.error.message) : ""}`);
+}));
+document.addEventListener("visibilitychange", () => log("visibility changed"));
+
+async function playClip(name, fetchNow) {
+  let src = `/static/locktest/${name}.mp3`;
+  if (fetchNow) {  // a new reply: fetch it now, while (maybe) locked
+    try {
+      const r = await fetch(src + "?t=" + Date.now(), { cache: "no-store" });
+      src = URL.createObjectURL(await r.blob()); log(`fetched ${name} (${r.status})`);
+    } catch (e) { log(`fetch ${name} FAILED ${e.message}`); return; }
+  }
+  el.loop = false; el.dataset.name = name; el.src = src;
+  try { await el.play(); } catch (e) { log(`play() ${name} REJECTED ${e.name}: ${e.message}`); }
+}
+el.addEventListener("ended", () => {
+  if (document.getElementById("keep").checked && el.dataset.name !== "silence") {
+    el.dataset.name = "silence"; el.loop = true; el.src = "/static/locktest/silence.mp3";
+    el.play().catch(e => log("silence play() REJECTED " + e.message));
+  }
+});
+
+document.getElementById("start").onclick = () => {
+  T0.t = Date.now();
+  log(`start, keep-alive ${document.getElementById("keep").checked ? "on" : "off"}`);
+  if ("mediaSession" in navigator) navigator.mediaSession.metadata = new MediaMetadata({ title: "Voice Bridge lock test" });
+  playClip("c1", false);  // inside the tap, so iOS allows it
+  [[40, "c2"], [80, "c3"], [120, "c4"]].forEach(([s, n]) =>
+    setTimeout(() => { log(`timer for ${n} fired`); playClip(n, true); }, s * 1000));
+};
+document.getElementById("clear").onclick = () => { localStorage.removeItem(KEY); show(); };
+show();
+</script>
+</body>
+</html>
