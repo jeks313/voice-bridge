@@ -46,6 +46,7 @@ def pairing_token():
 
 
 TOKEN = pairing_token()
+DESCRIBED_GAP = 6  # seconds of quiet before another described command is spoken
 
 contract = (APP / "contract.md").read_text().replace("{glossary}", ", ".join(GLOSSARY))
 # "herdr" drives a real herdr pane on spiff (M4); "pod" is M1's claude -p session inside this pod
@@ -164,18 +165,28 @@ async def run_turn(conn, text, timing):
 
     spoken_kinds, counts = set(), {}
     last_sound = [time.time()]  # when anything was last said (a sentence or a cue)
+    last_cue = [0.0]  # when a tool cue was last queued
 
     async def cue_tool(name, inp):
         c = cues.cue(name, inp)
         if not c:
             return
         kind, line = c
+        # A shell command the agent described ("Commit and push the fix") is spoken
+        # as written: each new one, at most one every few seconds. Anything else
+        # speaks once per kind of tool.
+        said = cues.described(name, inp)
+        line = said or line
         counts[kind] = counts.get(kind, 0) + 1
         await conn.send({"type": "tool", "kind": kind, "count": counts[kind], "line": line, "name": name})
-        if kind not in spoken_kinds:
-            spoken_kinds.add(kind)
-            last_sound[0] = time.time()
-            await queue.put(("cue", line))
+        if said:
+            if said in spoken_kinds or time.time() - last_cue[0] < DESCRIBED_GAP:
+                return
+        elif kind in spoken_kinds:
+            return
+        spoken_kinds.update((kind, line))
+        last_sound[0] = last_cue[0] = time.time()
+        await queue.put(("cue", line))
 
     async def ticker():
         """Twenty seconds of silence mid-turn gets a "still working"."""

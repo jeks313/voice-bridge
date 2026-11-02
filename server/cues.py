@@ -45,7 +45,7 @@ def cue(name: str, inp: dict):
         if re.match(r"(sudo\s+)?kubectl\b", cmd.strip()):
             return "cluster", "Checking the cluster."
         if first == "git" or " git " in f" {cmd} ":
-            return "git", "Running git."
+            return "git", git_line(cmd)
         if first in ("ssh", "scp"):
             host = next((w.split("@")[-1] for w in cmd.split()[1:] if not w.startswith("-")), "")
             return "ssh", f"Connecting to {host}." if host else "Connecting to another machine."
@@ -58,6 +58,29 @@ def cue(name: str, inp: dict):
     if m:
         return m.group(1), f"Using {m.group(1).replace('-', ' ').replace('_', ' ')}."
     return n.lower(), f"Using {n}."
+
+
+GIT = [  # first match wins, so commit+push reads as pushing
+    ("push", "Pushing to GitHub."), ("pull", "Pulling the latest changes."), ("rebase", "Rebasing the branch."),
+    ("commit", "Committing the change."), ("filter-repo", "Rewriting the git history."),
+    ("clone", "Cloning a repo."), ("merge", "Merging a branch."), ("checkout|switch", "Switching branches."),
+    ("diff", "Looking at what changed."), ("log", "Reading the git history."), ("status", "Checking for uncommitted work."),
+]
+
+
+def git_line(cmd: str) -> str:
+    for verb, line in GIT:
+        if re.search(rf"\bgit\s+(?:-\S+\s+\S+\s+)*(?:{verb})\b", cmd):
+            return line
+    return "Running git."
+
+
+def described(name: str, inp: dict):
+    """The agent's own one-line description of a shell command, ready to speak, or None."""
+    d = str((inp or {}).get("description") or "").strip()
+    if name != "Bash" or not d or len(d) > 90:
+        return None
+    return d[0].upper() + d[1:] + ("" if d[-1] in ".!?" else ".")
 
 
 LABEL = {"reddit": "Reddit", "search": "web search", "fetch": "web page", "email": "email", "calendar": "calendar",
