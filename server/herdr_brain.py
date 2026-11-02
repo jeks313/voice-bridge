@@ -184,20 +184,30 @@ class HerdrBrain:
         return ws[0]["workspace_id"] if ws else None
 
     async def topics(self):
-        """[{"id": pane, "tab", "name", "status", "last", "active"}], most recently used first."""
-        wid = await self._workspace()
-        if not wid:
-            return []
-        tabs = {t["tab_id"]: t for t in (await herdr("tab", "list", "--workspace", wid))["tabs"]}
+        """Every Claude agent open in herdr: voice-workspace topics first, then the rest, each most recent first.
+        [{"id": pane, "tab", "name", "group": "voice"|"other", "workspace", "status", "last", "active"}]"""
+        wss = {w["workspace_id"]: w.get("label") or w["workspace_id"] for w in (await herdr("workspace", "list"))["workspaces"]}
+        wid = next((k for k, v in wss.items() if v == NAME), None)
+        agents = [a for a in (await herdr("agent", "list"))["agents"] if a.get("agent") == "claude"]
+        tabs = {}
+        for w in {a["workspace_id"] for a in agents}:
+            for t in (await herdr("tab", "list", "--workspace", w))["tabs"]:
+                tabs[t["tab_id"]] = t
         out = []
-        for a in (await herdr("agent", "list"))["agents"]:
-            if a.get("workspace_id") != wid or a.get("tab_id") not in tabs:
-                continue
+        for a in agents:
+            voice = a["workspace_id"] == wid
+            label = (tabs.get(a["tab_id"]) or {}).get("label") or ""
+            title = (a.get("terminal_title_stripped") or "").strip()
+            if voice:
+                name = label or "Untitled"
+            else:  # desk sessions: Claude's own session title beats herdr's numeric tab label
+                name = title if title and title != "Claude Code" else (label if label and not label.isdigit() else f"Tab {label or '?'}")
             path = self._jsonl(a)
-            out.append({"id": a["pane_id"], "tab": a["tab_id"], "name": tabs[a["tab_id"]].get("label") or "Untitled",
-                        "status": a.get("agent_status"), "last": path.stat().st_mtime if path.exists() else 0,
+            out.append({"id": a["pane_id"], "tab": a["tab_id"], "name": name, "group": "voice" if voice else "other",
+                        "workspace": wss.get(a["workspace_id"], a["workspace_id"]), "status": a.get("agent_status"),
+                        "last": path.stat().st_mtime if path.exists() else 0,
                         "active": a["pane_id"] == self.target or a.get("name") == self.target})
-        return sorted(out, key=lambda t: -t["last"])
+        return sorted(out, key=lambda t: (t["group"] != "voice", -t["last"]))
 
     async def switch_topic(self, pane):
         async with self.lock:
@@ -227,14 +237,14 @@ class HerdrBrain:
         return self._sid
 
     async def rename_topic(self, pane, name):
-        t = [t for t in await self.topics() if t["id"] == pane]
+        t = [t for t in await self.topics() if t["id"] == pane and t["group"] == "voice"]
         if t:
             await herdr("tab", "rename", t[0]["tab"], *name.split())
 
     async def name_if_untitled(self, text):
         """Name a "New chat" tab after the first thing said in it."""
         t = [t for t in await self.topics() if t["active"]]
-        if t and t[0]["name"] == "New chat":
+        if t and t[0]["group"] == "voice" and t[0]["name"] == "New chat":
             words = [w.strip(".,?!") for w in text.split()][:5]
             if words:
                 await herdr("tab", "rename", t[0]["tab"], *words)
