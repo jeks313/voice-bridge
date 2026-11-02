@@ -54,6 +54,11 @@ stt = STT()
 tts = TTS()
 
 
+# reply sentences that were due while the phone was away (screen locked, connection dropped);
+# offered on the next connection as "Play what you missed"
+MISSED: list = []
+
+
 class Conn:
     """One phone connection: serialised sends, at most one turn running, at most one permission pending."""
 
@@ -62,16 +67,32 @@ class Conn:
         self.lock = asyncio.Lock()
         self.turn_task = None
         self.pending = None  # {"id", "info", "fut"} while a permission prompt waits for Chris
+        self.lost = False  # the phone went away mid-turn; the turn finishes and its reply is kept in MISSED
 
     async def send(self, obj):
-        async with self.lock:
-            await self.ws.send_json(obj)
+        if self.lost or self.ws.closed:
+            self.lost = True
+            return
+        try:
+            async with self.lock:
+                await self.ws.send_json(obj)
+        except (ConnectionError, RuntimeError):
+            self.lost = True
 
-    async def say(self, text, seq, audio, cue=False):
-        async with self.lock:  # the "say" frame and its WAV must stay adjacent
-            await self.ws.send_json({"type": "say", "text": text, "seq": seq, "audio": bool(audio), "cue": cue})
-            if audio:
-                await self.ws.send_bytes(audio)
+    async def say(self, text, seq, audio, cue=False, replay=False):
+        if not (self.lost or self.ws.closed):
+            try:
+                async with self.lock:  # the "say" frame and its WAV must stay adjacent
+                    await self.ws.send_json({"type": "say", "text": text, "seq": seq, "audio": bool(audio),
+                                             "cue": cue, "replay": replay})
+                    if audio:
+                        await self.ws.send_bytes(audio)
+                return
+            except (ConnectionError, RuntimeError):
+                pass
+        self.lost = True
+        if not cue and seq >= 0:
+            MISSED.append(text)
 
     async def speak_now(self, text):
         """Speak a line outside a turn (e.g. "say yes or no")."""
@@ -99,7 +120,7 @@ async def run_turn(conn, text, timing):
             if is_cue:
                 sentence = sentence[1]
             audio = None
-            if tts_ok:
+            if tts_ok and not (conn.lost or conn.ws.closed):  # nobody to play it to: keep the text only
                 try:
                     audio = await tts.speak(sentence)
                 except Exception as e:  # keep the turn going; the text still shows on screen
@@ -241,6 +262,7 @@ async def handle_input(conn, text, timing, by):
     if conn.busy:
         await conn.send({"type": "error", "text": "Still working on the last one."})
         return
+    MISSED.clear()  # a new turn supersedes anything left unheard
     conn.turn_task = asyncio.create_task(turn(conn, text, timing))
 
 
@@ -261,6 +283,8 @@ async def ws_handler(request):
                 state = await tts.warm()
                 asyncio.create_task(brain.ensure())
                 await conn.send({"type": "ready", "tts": state, "session": brain.session_id})
+                if MISSED:
+                    await conn.send({"type": "missed", "text": " ".join(MISSED)})
             elif not authed:
                 break
             elif m["type"] == "utterance":
@@ -277,6 +301,14 @@ async def ws_handler(request):
                 async with brain.lock:
                     sid = await brain.start(new=True)
                 await conn.send({"type": "ready", "tts": await tts.status(), "session": sid})
+            elif m["type"] == "replay":
+                lines, MISSED[:] = list(MISSED), []
+                for i, line in enumerate(lines):
+                    try:
+                        audio = await tts.speak(line)
+                    except Exception:
+                        audio = None
+                    await conn.say(line, i, audio, replay=True)
             elif m["type"] == "topics":
                 await send_topics(conn)
             elif m["type"] in ("switch_topic", "new_topic"):

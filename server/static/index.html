@@ -172,7 +172,14 @@ function connect() {
     } else if (m.type === "transcript") {
       add("me", m.text || "(didn't catch that)");
     } else if (m.type === "say") {
-      add(m.cue ? "meta" : "it", m.text); nextIsAudio = m.audio;
+      if (!m.replay) add(m.cue ? "meta" : "it", m.text);
+      nextIsAudio = m.audio;
+    } else if (m.type === "missed") {
+      add("it", m.text);
+      const bar = document.createElement("div"); bar.className = "resume";
+      bar.innerHTML = `<span>You missed this while the phone was away</span><button>Play it</button>`;
+      bar.querySelector("button").onclick = () => { audioCtx(); ws.send(JSON.stringify({ type: "replay" })); bar.remove(); };
+      $("log").appendChild(bar); $("log").scrollTop = $("log").scrollHeight;
     } else if (m.type === "tool") {
       tools[m.kind] = m.count;
       $("activity").textContent = "Working: " + Object.entries(tools).map(([k, n]) => n > 1 ? `${k} ×${n}` : k).join(" · ");
@@ -214,6 +221,18 @@ $("vclose").onclick = () => $("viewer").style.display = "none";
 // Manual mode: tap to start, tap to send. A tap always sends straight away in either mode.
 let autoMode = localStorage.voiceMode !== "manual", autoArmed = false, vad = null;
 const SILENCE_MS = 2000, NO_SPEECH_MS = 8000;
+let wake = null;
+async function updateWake() {
+  const want = document.visibilityState === "visible" && ((autoMode && autoArmed) || busy || !!rec);
+  try {
+    if (want && !wake && navigator.wakeLock) {
+      wake = await navigator.wakeLock.request("screen");
+      wake.addEventListener("release", () => { wake = null; });
+    } else if (!want && wake) { const w = wake; wake = null; await w.release(); }
+  } catch (e) { wake = null; }
+}
+setInterval(updateWake, 2000);  // cheap, and catches every state change without hooks everywhere
+document.addEventListener("visibilitychange", updateWake);
 function showMode() { $("mode").textContent = "Auto send"; $("mode").classList.toggle("on", autoMode); }
 $("mode").onclick = () => { autoMode = !autoMode; localStorage.voiceMode = autoMode ? "auto" : "manual"; if (!autoMode) autoArmed = false; showMode(); };
 showMode();
