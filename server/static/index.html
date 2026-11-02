@@ -225,7 +225,7 @@ $("vclose").onclick = () => $("viewer").style.display = "none";
 // Auto mode: a pause ends the utterance and sends it, and the mic reopens after each reply.
 // Manual mode: tap to start, tap to send. A tap always sends straight away in either mode.
 let autoMode = localStorage.voiceMode !== "manual", autoArmed = false, vad = null;
-const SILENCE_MS = 2000, NO_SPEECH_MS = 8000;
+const SILENCE_MS = 2000, NO_SPEECH_MS = 8000, MAX_UTT_MS = 60000;
 let wake = null;
 async function updateWake() {
   const want = document.visibilityState === "visible" && ((autoMode && autoArmed) || busy || !!rec);
@@ -254,7 +254,9 @@ function stopRec(send) {
   if (!rec) return;
   if (vad) { clearInterval(vad); vad = null; }
   rec.cancelled = !send;
-  $("talk").classList.remove("rec"); rec.stop();
+  $("talk").classList.remove("rec");
+  if (rec.state === "inactive") { rec = null; $("talk").textContent = "Tap to talk"; return; }  // iOS killed it
+  try { rec.stop(); } catch (e) { rec = null; $("talk").textContent = "Tap to talk"; }
 }
 function watchSilence(stream) {
   // energy-based end of speech: calibrate on the first 300 ms, then wait for speech followed by a pause
@@ -271,12 +273,25 @@ function watchSilence(stream) {
     if (rms > thr) { loudMs += 50; quietSince = null; if (loudMs >= 250) spoke = true; }
     else { loudMs = Math.max(0, loudMs - 25); quietSince = quietSince || now; }
     if (spoke && quietSince && now - quietSince > SILENCE_MS) stopRec(true);
+    else if (now - t0 > MAX_UTT_MS) stopRec(true);  // wind or traffic can hide every pause: send anyway
     else if (!spoke && now - t0 > NO_SPEECH_MS) { autoArmed = false; stopRec(false); add("meta", "Didn't hear anything; tap to talk"); }
   }, 50);
 }
+let starting = false;
 async function startRec() {
+  if (starting) return;
   audioCtx(); stopAudio();
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+  starting = true;
+  let stream;
+  try {
+    // iOS can leave getUserMedia hanging forever after an audio interruption: give up after 5 s
+    stream = await Promise.race([
+      navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }),
+      new Promise((_, no) => setTimeout(() => no(new Error("the microphone didn't start; tap to try again")), 5000)),
+    ]);
+  } finally { starting = false; }
+  // the system can take the mic away mid-recording (a call, Siri): send what we have
+  stream.getAudioTracks().forEach(t => t.onended = () => stopRec(true));
   const type = ["audio/mp4", "audio/webm;codecs=opus", "audio/webm"].find(t => MediaRecorder.isTypeSupported(t)) || "";
   rec = new MediaRecorder(stream, type ? { mimeType: type } : {});
   chunks = []; rec.ondataavailable = e => e.data.size && chunks.push(e.data);
@@ -297,6 +312,7 @@ async function startRec() {
 }
 $("talk").onclick = () => {
   if (busy) return;
+  if (rec && rec.state === "inactive") rec = null;  // a recorder iOS stopped behind our back
   if (rec) stopRec(true);
   else { autoArmed = autoMode; startRec().catch(e => add("err", "Mic: " + e.message)); }
 };
