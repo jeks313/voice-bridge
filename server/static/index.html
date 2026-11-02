@@ -142,12 +142,14 @@ function stopAudio() { stopGen++; try { window._src && window._src.stop(); } cat
 function connect() {
   ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
   ws.binaryType = "arraybuffer";
-  ws.onopen = () => ws.send(JSON.stringify({ type: "hello", token }));
-  ws.onclose = () => { setState("Disconnected, retrying...", ""); if (busy) { setBusy(false); add("err", "Connection dropped; that turn may not have arrived."); } setTimeout(connect, 1500); };
+  ws.onopen = () => { lastSeen = Date.now(); ws.send(JSON.stringify({ type: "hello", token })); };
+  ws.onclose = () => { dropped(); setTimeout(connect, 1500); };
   ws.onmessage = ev => {
-    lastMsg = Date.now();
+    lastMsg = lastSeen = Date.now();
+    if (typeof ev.data === "string" && ev.data.startsWith('{"type": "pong"')) return;
     if (typeof ev.data !== "string") { if (nextIsAudio) play(ev.data); nextIsAudio = false; return; }
     const m = JSON.parse(ev.data);
+    if (m.type === "ready" && pendingUtt) { add("meta", "Resending what you said..."); setBusy(true); lastMsg = Date.now(); sendUtt(); }
     if (m.type === "ready" && !historyLoaded) { historyLoaded = true; ws.send(JSON.stringify({ type: "history" })); ws.send(JSON.stringify({ type: "topics" })); }
     if (m.type === "topics") { showTopics(m.items); return; }
     if (m.type === "fallback") { add("me", m.text); return; }  // the spoken cue that follows says why the chat changed
@@ -172,6 +174,7 @@ function connect() {
                t === "ready" ? "ok" : t === "loading" ? "loading" : "");
       if (t === "loading") setTimeout(() => ws.readyState === 1 && ws.send(JSON.stringify({ type: "status" })), 3000);
     } else if (m.type === "transcript") {
+      pendingUtt = null;  // the server has it
       add("me", m.text || "(didn't catch that)");
     } else if (m.type === "say") {
       if (!m.replay) add(m.cue ? "meta" : "it", m.text);
@@ -284,8 +287,8 @@ async function startRec() {
     $("talk").textContent = "Tap to talk";
     if (cancelled || !connected()) return;
     chime(660); setBusy(true); lastMsg = Date.now();
-    ws.send(JSON.stringify({ type: "utterance", mime: blob.type }));
-    ws.send(await blob.arrayBuffer());
+    pendingUtt = { mime: blob.type, buf: await blob.arrayBuffer() };
+    sendUtt();
   };
   rec.start(); chime(880);
   if (autoMode) watchSilence(stream);
@@ -301,6 +304,30 @@ $("talk").onclick = () => {
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "hidden") { autoArmed = false; stopRec(false); }
 });
+// Walking off Wi-Fi leaves a socket that looks open but delivers nothing. Ping every 5 s; if nothing
+// comes back for 15 s, drop it and reconnect, and resend an utterance the server never acknowledged.
+let lastSeen = Date.now(), pendingUtt = null;
+function sendUtt() {
+  if (!pendingUtt || !ws || ws.readyState !== 1) return;
+  ws.send(JSON.stringify({ type: "utterance", mime: pendingUtt.mime }));
+  ws.send(pendingUtt.buf);
+}
+function dropped() {
+  setState("Reconnecting...", "");
+  if (busy) {
+    setBusy(false);
+    add("err", pendingUtt ? "Connection dropped; I'll resend what you said." : "Connection dropped; that turn may not have arrived.");
+  }
+}
+setInterval(() => {
+  if (!ws || ws.readyState !== 1) return;
+  if (Date.now() - lastSeen > 15000) {
+    const old = ws; old.onclose = null; old.onmessage = null;
+    try { old.close(); } catch (e) {}
+    dropped(); connect(); return;
+  }
+  ws.send(JSON.stringify({ type: "ping" }));
+}, 5000);
 function connected() {
   if (ws && ws.readyState === 1) return true;
   add("err", "Not connected yet, try again in a moment."); return false;

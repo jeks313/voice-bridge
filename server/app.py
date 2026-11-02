@@ -57,6 +57,9 @@ tts = TTS()
 # reply sentences that were due while the phone was away (screen locked, connection dropped);
 # offered on the next connection as "Play what you missed"
 MISSED: list = []
+# the newest paired phone socket: a turn started on a socket that later died (walking off Wi-Fi)
+# keeps talking to the phone's replacement connection instead
+LATEST = {"ws": None}
 
 
 class Conn:
@@ -69,24 +72,29 @@ class Conn:
         self.pending = None  # {"id", "info", "fut"} while a permission prompt waits for Chris
         self.lost = False  # the phone went away mid-turn; the turn finishes and its reply is kept in MISSED
 
+    @property
+    def out(self):
+        ws = LATEST["ws"]
+        return ws if ws is not None and not ws.closed else self.ws
+
     async def send(self, obj):
-        if self.lost or self.ws.closed:
+        if self.out.closed:
             self.lost = True
             return
         try:
             async with self.lock:
-                await self.ws.send_json(obj)
+                await self.out.send_json(obj)
         except (ConnectionError, RuntimeError):
             self.lost = True
 
     async def say(self, text, seq, audio, cue=False, replay=False):
-        if not (self.lost or self.ws.closed):
+        if not self.out.closed:
             try:
                 async with self.lock:  # the "say" frame and its WAV must stay adjacent
-                    await self.ws.send_json({"type": "say", "text": text, "seq": seq, "audio": bool(audio),
+                    await self.out.send_json({"type": "say", "text": text, "seq": seq, "audio": bool(audio),
                                              "cue": cue, "replay": replay})
                     if audio:
-                        await self.ws.send_bytes(audio)
+                        await self.out.send_bytes(audio)
                 return
             except (ConnectionError, RuntimeError):
                 pass
@@ -120,7 +128,7 @@ async def run_turn(conn, text, timing):
             if is_cue:
                 sentence = sentence[1]
             audio = None
-            if tts_ok and not (conn.lost or conn.ws.closed):  # nobody to play it to: keep the text only
+            if tts_ok and not conn.out.closed:  # nobody to play it to: keep the text only
                 try:
                     audio = await tts.speak(sentence)
                 except Exception as e:  # keep the turn going; the text still shows on screen
@@ -280,6 +288,7 @@ async def ws_handler(request):
                 if not authed:
                     await conn.send({"type": "error", "text": "bad token"})
                     break
+                LATEST["ws"] = ws
                 state = await tts.warm()
                 asyncio.create_task(brain.ensure())
                 await conn.send({"type": "ready", "tts": state, "session": brain.session_id})
@@ -333,6 +342,8 @@ async def ws_handler(request):
             elif m["type"] == "history":
                 items = await brain.history() if hasattr(brain, "history") else []
                 await conn.send({"type": "history", "items": items, "session": brain.session_id})
+            elif m["type"] == "ping":
+                await conn.send({"type": "pong"})
             elif m["type"] == "status":
                 await conn.send({"type": "status", "tts": await tts.status()})
         elif msg.type == WSMsgType.BINARY and authed and pending_mime:
