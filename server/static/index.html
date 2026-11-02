@@ -38,7 +38,8 @@
   #talk.rec { background: var(--rec); } #talk.busy { background: #333a4d; color: #aab; }
   .row { display: flex; gap: 8px; }
   .row input { flex: 1; background: var(--card); border: 1px solid #2c3140; color: inherit; border-radius: 12px; padding: 10px 12px; font-size: 16px; }
-  #mode.on { border-color: var(--accent); color: #c9d6ff; }
+  .row #mode { background: #23262e; border-color: #2c3140; color: #6b7080; font-weight: 600; }
+  .row #mode.on { background: var(--accent); border-color: var(--accent); color: #fff; }
   .row button { background: var(--card); border: 1px solid #2c3140; color: inherit; border-radius: 12px; padding: 0 14px; font-size: 15px; }
   header #topicbtn { margin-left: auto; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   header #topicbtn + #newconv { margin-left: 0; }
@@ -213,7 +214,7 @@ $("vclose").onclick = () => $("viewer").style.display = "none";
 // Manual mode: tap to start, tap to send. A tap always sends straight away in either mode.
 let autoMode = localStorage.voiceMode !== "manual", autoArmed = false, vad = null;
 const SILENCE_MS = 2000, NO_SPEECH_MS = 8000;
-function showMode() { $("mode").textContent = autoMode ? "Auto send" : "Manual send"; $("mode").classList.toggle("on", autoMode); }
+function showMode() { $("mode").textContent = "Auto send"; $("mode").classList.toggle("on", autoMode); }
 $("mode").onclick = () => { autoMode = !autoMode; localStorage.voiceMode = autoMode ? "auto" : "manual"; if (!autoMode) autoArmed = false; showMode(); };
 showMode();
 
