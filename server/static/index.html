@@ -24,6 +24,7 @@
   .resume { align-self: stretch; display: flex; align-items: center; gap: 10px; background: #1b2233; border: 1px solid #2c3a5a; border-radius: 12px; padding: 8px 12px; font-size: 14px; color: #b8c4e0; }
   .resume button { margin-left: auto; background: var(--accent); color: #fff; border: 0; border-radius: 10px; padding: 8px 12px; font-size: 15px; font-weight: 600; }
   .old { opacity: .75; }
+  .it a { color: #8fb1ff; text-decoration: underline; word-break: break-word; }
   .file { align-self: flex-start; background: #1f2a1f; border: 1px solid #2f4a2f; padding: 8px 12px; border-radius: 12px; font-size: 15px; }
   .meta { align-self: center; font-size: 12px; color: var(--muted); }
   .err { align-self: center; font-size: 14px; color: #ff8a8a; }
@@ -73,8 +74,21 @@ function askKey() {
 let tools = {}, historyLoaded = false;
 let ws, rec, chunks = [], busy = false, ctx, playing = Promise.resolve(), stopGen = 0, nextIsAudio = false;
 
+// [label](url) and bare http(s) URLs become tappable links; everything else stays plain text
+const LINK = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|<?(https?:\/\/[^\s<>)]+[^\s<>).,!?;:'"])>?/g;
+function linkify(el, text) {
+  let last = 0;
+  for (const m of text.matchAll(LINK)) {
+    el.append(text.slice(last, m.index));
+    const a = document.createElement("a");
+    a.href = m[2] || m[3]; a.textContent = m[1] || m[3]; a.target = "_blank"; a.rel = "noopener";
+    el.append(a); last = m.index + m[0].length;
+  }
+  el.append(text.slice(last));
+}
 function add(cls, text) {
-  const d = document.createElement("div"); d.className = cls; d.textContent = text;
+  const d = document.createElement("div"); d.className = cls;
+  if (cls === "it") linkify(d, text); else d.textContent = text;
   $("log").appendChild(d); $("log").scrollTop = $("log").scrollHeight; return d;
 }
 function setState(text, cls) { $("state").textContent = text; $("dot").className = "dot " + (cls || ""); }

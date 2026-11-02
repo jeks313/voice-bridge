@@ -65,6 +65,7 @@ def speakable(text: str) -> str:
     name = lambda p: re.sub(r"\.\w{1,4}$", "", p.rstrip("/").split("/")[-1])  # a path is said as its file name
     t = re.sub(r"`([^`]*)`", lambda m: name(m.group(1)) if "/" in m.group(1) else m.group(1), text)
     t = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", t)
+    t = re.sub(r"<?https?://[^\s>)]+>?", "the link", t)  # a bare URL is tappable on screen, never read out
     # a path: starts with ~ / ./, or has two slashes, or ends in a file extension (not 24/7, and/or)
     t = re.sub(r"(?<![\w/])(?:(?:~|\.{1,2})?/(?:[\w.-]+/)*[\w.-]+|[\w.-]+/[\w.-]+/[\w./-]+|[\w.-]+/[\w-]+\.\w{1,4})(?![\w/])",
                lambda m: name(m.group(0)), t)
