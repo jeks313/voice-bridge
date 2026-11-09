@@ -1,0 +1,42 @@
+name: ci
+
+# Renovate merges its own PRs only when this is green, so it builds what
+# ships: both images, from a clean checkout. That is also the check that
+# would have caught bench/prompts.json never being committed (c32840f):
+# the recorder image only built from one working tree.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { name: recorder, context: ., dockerfile: recorder/Dockerfile }
+          - { name: server, context: server, dockerfile: server/Dockerfile }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Build ${{ matrix.name }} image
+        run: docker build -t ${{ matrix.name }} -f ${{ matrix.dockerfile }} ${{ matrix.context }}
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.27.3'
+      # The CLI, not gitleaks-action: the action left MIT at v2.
+      - name: gitleaks
+        env:
+          # renovate: datasource=go depName=github.com/zricethezav/gitleaks/v8
+          GITLEAKS_VERSION: v8.30.1
+        run: go run github.com/zricethezav/gitleaks/v8@$GITLEAKS_VERSION git --redact -v .
