@@ -2,6 +2,12 @@
 # Claude Code, its config and the vault are mounted from the host at their real paths (see k3s/voice-bridge.yaml).
 FROM docker.io/library/python:3.12-slim-bookworm@sha256:623674a14ef93d052bb9b0de4dbf5f28eb578a35263838941cc8aa43213c1487
 
+# Debian security fixes land in the archive days or weeks before the upstream
+# python image is rebuilt, so the pinned digest alone leaves fixable CVEs
+# (zlib1g, apt) in the image. Pull them in at build time.
+RUN apt-get update && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg git ca-certificates procps \
     && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt /tmp/requirements.txt
