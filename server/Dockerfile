@@ -1,6 +1,6 @@
 # Voice bridge M1: phone app, Whisper STT (GTX 1080), dedicated Claude Code session, TTS client.
 # Claude Code, its config and the vault are mounted from the host at their real paths (see k3s/voice-bridge.yaml).
-FROM docker.io/library/python:3.12-slim-bookworm@sha256:623674a14ef93d052bb9b0de4dbf5f28eb578a35263838941cc8aa43213c1487
+FROM docker.io/library/python:3.12-slim-bookworm@sha256:0f086103b026048cc50cb5da25ec435c023c5241a83fc44daea593377abc61c4
 
 # Debian security fixes land in the archive days or weeks before the upstream
 # python image is rebuilt, so the pinned digest alone leaves fixable CVEs
