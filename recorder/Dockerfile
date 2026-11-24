@@ -1,5 +1,5 @@
 # M0 utterance recorder for the voice bench. Stdlib Python, no dependencies.
-FROM docker.io/library/python:3.12-slim-bookworm@sha256:0f086103b026048cc50cb5da25ec435c023c5241a83fc44daea593377abc61c4
+FROM docker.io/library/python:3.12-slim-bookworm@sha256:1475c4f5b6bcb7d35e57661d6f5d7429ec4041275633c15f2b49350ac898276d
 
 # Debian security fixes land in the archive days or weeks before the upstream
 # python image is rebuilt, so the pinned digest alone leaves fixable CVEs
